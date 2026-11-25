@@ -4,12 +4,13 @@ import type {
   ActivityCategory,
   AuthenticatedUser,
   DayConfirmationState,
-  DayKey,
+  EditableDayKey,
   ScheduleOwner,
 } from '../types';
+import { formatShortIndonesianDate } from '../utils/freeTime';
 
 export interface AddScheduleInitial {
-  day: DayKey;
+  day: EditableDayKey;
   owner: ScheduleOwner;
   title?: string;
   category?: ActivityCategory;
@@ -21,13 +22,12 @@ interface AddScheduleModalProps {
   open: boolean;
   initial: AddScheduleInitial | null;
   currentUser: AuthenticatedUser;
-  confirmedPersonal: {
-    today: DayConfirmationState;
-    tomorrow: DayConfirmationState;
-  };
+  todayDate: string;
+  tomorrowDate: string;
+  confirmedByDate: Record<string, DayConfirmationState>;
   onClose: () => void;
   onSave: (payload: {
-    day: DayKey;
+    date: string;
     owner: ScheduleOwner;
     title: string;
     category: ActivityCategory;
@@ -54,11 +54,13 @@ export function AddScheduleModal({
   open,
   initial,
   currentUser,
-  confirmedPersonal,
+  todayDate,
+  tomorrowDate,
+  confirmedByDate,
   onClose,
   onSave,
 }: AddScheduleModalProps) {
-  const [day, setDay] = useState<DayKey>('today');
+  const [day, setDay] = useState<EditableDayKey>('today');
   const [owner, setOwner] = useState<ScheduleOwner>(currentUser.slot);
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<ActivityCategory>('kuliah');
@@ -68,11 +70,14 @@ export function AddScheduleModal({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const wasOpenRef = useRef(false);
-  const confirmedRef = useRef(confirmedPersonal);
-  confirmedRef.current = confirmedPersonal;
+  const confirmedRef = useRef(confirmedByDate);
+  confirmedRef.current = confirmedByDate;
 
-  const bothConfirmedForDay =
-    confirmedPersonal[day].partner1 && confirmedPersonal[day].partner2;
+  const selectedDate = day === 'today' ? todayDate : tomorrowDate;
+  const selectedConf = confirmedByDate[selectedDate];
+  const bothConfirmedForDay = Boolean(
+    selectedConf?.partner1 && selectedConf?.partner2
+  );
 
   useEffect(() => {
     const justOpened = open && !wasOpenRef.current;
@@ -80,8 +85,9 @@ export function AddScheduleModal({
 
     if (justOpened && initial) {
       const targetDay = initial.day;
-      const conf = confirmedRef.current[targetDay];
-      const canUseTogether = conf.partner1 && conf.partner2;
+      const targetDate = targetDay === 'today' ? todayDate : tomorrowDate;
+      const conf = confirmedRef.current[targetDate];
+      const canUseTogether = Boolean(conf?.partner1 && conf?.partner2);
       const safeOwner: ScheduleOwner =
         initial.owner === 'together' && canUseTogether
           ? 'together'
@@ -97,7 +103,7 @@ export function AddScheduleModal({
       setEndTime(initial.endTime ?? '11:00');
       setErrorMsg(null);
     }
-  }, [open, initial, currentUser.slot]);
+  }, [open, initial, currentUser.slot, todayDate, tomorrowDate]);
 
   if (!open) return null;
 
@@ -116,7 +122,7 @@ export function AddScheduleModal({
     }
     setSaving(true);
     const err = await onSave({
-      day,
+      date: selectedDate,
       owner,
       title: title.trim(),
       category,
@@ -130,6 +136,9 @@ export function AddScheduleModal({
       onClose();
     }
   };
+
+  const todayConf = confirmedByDate[todayDate];
+  const tomorrowConf = confirmedByDate[tomorrowDate];
 
   return (
     <div
@@ -164,7 +173,7 @@ export function AddScheduleModal({
                   setDay('today');
                   if (
                     owner === 'together' &&
-                    !(confirmedPersonal.today.partner1 && confirmedPersonal.today.partner2)
+                    !(todayConf?.partner1 && todayConf?.partner2)
                   ) {
                     setOwner(currentUser.slot);
                     setCategory('kuliah');
@@ -176,7 +185,7 @@ export function AddScheduleModal({
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Hari Ini
+                Hari Ini ({formatShortIndonesianDate(todayDate)})
               </button>
               <button
                 type="button"
@@ -184,7 +193,7 @@ export function AddScheduleModal({
                   setDay('tomorrow');
                   if (
                     owner === 'together' &&
-                    !(confirmedPersonal.tomorrow.partner1 && confirmedPersonal.tomorrow.partner2)
+                    !(tomorrowConf?.partner1 && tomorrowConf?.partner2)
                   ) {
                     setOwner(currentUser.slot);
                     setCategory('kuliah');
@@ -196,7 +205,7 @@ export function AddScheduleModal({
                     : 'text-zinc-400 hover:text-white'
                 }`}
               >
-                Besok
+                Besok ({formatShortIndonesianDate(tomorrowDate)})
               </button>
             </div>
           </div>

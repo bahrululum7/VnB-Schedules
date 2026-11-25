@@ -3,6 +3,7 @@ import confetti from 'canvas-confetti';
 import { AnimatePresence, motion } from 'motion/react';
 import { BellRing, Heart, Sparkles, X } from 'lucide-react';
 import type { ScheduleItem } from '../types';
+import { formatShortIndonesianDate } from '../utils/freeTime';
 import { playCuteAlarmChime } from '../utils/sound';
 
 export interface ActiveAlarmPayload {
@@ -111,7 +112,7 @@ export function ExplosionAlarmModal({ alarm, onDismiss }: ExplosionAlarmModalPro
             </div>
 
             <p className="font-mono-tabular text-xs font-medium tracking-wide text-pink-300 mb-2">
-              {alarm.item.startTime} – {alarm.item.endTime} · {alarm.item.day === 'today' ? 'Hari Ini' : 'Besok'}
+              {alarm.item.startTime} – {alarm.item.endTime} · {formatShortIndonesianDate(alarm.item.date)}
             </p>
 
             <h2

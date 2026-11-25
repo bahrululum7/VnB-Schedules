@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import {
   CalendarPlus,
   CheckCircle2,
+  History,
   Lock,
   Plus,
   RotateCw,
@@ -17,6 +18,8 @@ interface ActivitySpinnerProps {
   options: SpinnerOption[];
   lastSpin: SpinEvent | null;
   selectedDay: DayKey;
+  dateLabel: string;
+  isReadOnly: boolean;
   freeSlots: FreeSlot[];
   canBookQualityTime: boolean;
   onAddOption: (label: string) => Promise<string | null>;
@@ -42,6 +45,8 @@ export function ActivitySpinner({
   options,
   lastSpin,
   selectedDay,
+  dateLabel,
+  isReadOnly,
   freeSlots,
   canBookQualityTime,
   onAddOption,
@@ -95,6 +100,7 @@ export function ActivitySpinner({
   useEffect(() => {
     setSelectedSlotIdx(0);
     setConfirmedInserted(null);
+    setShowConfirmModal(false);
   }, [selectedDay]);
 
   // Trigger wheel spin animation keyed strictly by lastSpin.id so polling never cancels the timer
@@ -140,7 +146,7 @@ export function ActivitySpinner({
   const handleAdd = async (e: FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
-    if (!newLabel.trim()) return;
+    if (!newLabel.trim() || isReadOnly) return;
     setAdding(true);
     const err = await onAddOption(newLabel.trim());
     setAdding(false);
@@ -152,7 +158,15 @@ export function ActivitySpinner({
   };
 
   const handleSpinClick = async () => {
-    if (!canBookQualityTime || spinning || options.length < 2 || freeSlots.length === 0) return;
+    if (
+      isReadOnly ||
+      !canBookQualityTime ||
+      spinning ||
+      options.length < 2 ||
+      freeSlots.length === 0
+    ) {
+      return;
+    }
     setErrorMsg(null);
     setConfirmedInserted(null);
     setShowConfirmModal(false);
@@ -160,7 +174,7 @@ export function ActivitySpinner({
   };
 
   const handleConfirmInsert = async () => {
-    if (!displayedWinner || !customStart || !customEnd) return;
+    if (isReadOnly || !displayedWinner || !customStart || !customEnd) return;
     setErrorMsg(null);
 
     const chosenSlot = freeSlots[selectedSlotIdx] ?? freeSlots[0];
@@ -214,12 +228,19 @@ export function ActivitySpinner({
     return `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`;
   };
 
+  const dayText =
+    selectedDay === 'yesterday'
+      ? `Kemarin (${dateLabel})`
+      : selectedDay === 'today'
+        ? `Hari Ini (${dateLabel})`
+        : `Besok (${dateLabel})`;
+
   return (
     <>
       <section
         id="spin-kegiatan"
         className={`rounded-2xl border p-6 sm:p-7 transition-colors ${
-          canBookQualityTime
+          !isReadOnly && canBookQualityTime
             ? 'bg-[#14141B] border-pink-400/30'
             : 'bg-[#121218] border-white/10'
         }`}
@@ -230,27 +251,46 @@ export function ActivitySpinner({
               Langkah 3 · Spinner Kegiatan Quality Time
             </h2>
             <p className="text-sm text-zinc-400 mt-1">
-              {canBookQualityTime
-                ? 'Isi kegiatan spinner, pilih jam kosong yang mau diisi, lalu putar dan konfirmasi hasilnya.'
-                : 'Terbuka otomatis setelah kalian berdua konfirmasi selesai isi jadwal pribadi.'}
+              {isReadOnly
+                ? 'Tab Kemarin hanya menampilkan riwayat jadwal. Pindah ke Hari Ini atau Besok untuk memutar spinner.'
+                : canBookQualityTime
+                  ? 'Isi kegiatan spinner, pilih jam kosong yang mau diisi, lalu putar dan konfirmasi hasilnya.'
+                  : 'Terbuka otomatis setelah kalian berdua konfirmasi selesai isi jadwal pribadi.'}
             </p>
           </div>
-          {!canBookQualityTime && (
+          {isReadOnly ? (
             <div className="inline-flex items-center gap-2 text-xs font-medium text-zinc-400 shrink-0">
-              <Lock className="w-4 h-4 text-pink-400/70" />
-              <span>Menunggu konfirmasi berdua</span>
+              <History className="w-4 h-4 text-pink-400/70" />
+              <span>Mode Riwayat</span>
             </div>
+          ) : (
+            !canBookQualityTime && (
+              <div className="inline-flex items-center gap-2 text-xs font-medium text-zinc-400 shrink-0">
+                <Lock className="w-4 h-4 text-pink-400/70" />
+                <span>Menunggu konfirmasi berdua</span>
+              </div>
+            )
           )}
         </div>
 
-        {!canBookQualityTime ? (
+        {isReadOnly ? (
+          <div className="rounded-xl bg-[#0E0E13] border border-white/10 p-8 text-center space-y-2">
+            <History className="w-7 h-7 text-pink-400/70 mx-auto" />
+            <p className="font-display text-base font-semibold text-white">
+              Riwayat Kemarin Hanya Untuk Dilihat
+            </p>
+            <p className="text-sm text-zinc-400 max-w-md mx-auto">
+              Spinner tidak aktif di tab {dayText}. Pilih tab <span className="text-pink-300 font-medium">Hari Ini</span> atau <span className="text-pink-300 font-medium">Besok</span> untuk memutar spinner berdua.
+            </p>
+          </div>
+        ) : !canBookQualityTime ? (
           <div className="rounded-xl bg-[#0E0E13] border border-white/10 p-8 text-center space-y-2">
             <Lock className="w-7 h-7 text-pink-400/70 mx-auto" />
             <p className="font-display text-base font-semibold text-white">
               Spinner Masih Terkunci
             </p>
             <p className="text-sm text-zinc-400 max-w-md mx-auto">
-              Selesaikan jadwal pribadi masing-masing untuk {selectedDay === 'today' ? 'Hari Ini' : 'Besok'} lalu tekan tombol <span className="text-pink-300 font-medium">Konfirmasi Selesai</span> agar spinner terbuka.
+              Selesaikan jadwal pribadi masing-masing untuk {dayText} lalu tekan tombol <span className="text-pink-300 font-medium">Konfirmasi Selesai</span> agar spinner terbuka.
             </p>
           </div>
         ) : (
@@ -324,13 +364,13 @@ export function ActivitySpinner({
 
                 {freeSlots.length === 0 ? (
                   <p className="text-xs text-zinc-400 rounded-xl bg-[#0E0E13] border border-white/10 p-3.5">
-                    Tidak ada jam kosong minimal 30 menit di {selectedDay === 'today' ? 'Hari Ini' : 'Besok'}. Coba cek hari lain atau geser jadwal dulu.
+                    Tidak ada jam kosong minimal 30 menit di {dayText}. Coba cek hari lain atau geser jadwal dulu.
                   </p>
                 ) : (
                   <div className="rounded-xl bg-[#0E0E13] border border-white/10 p-4 space-y-3">
                     <div className="space-y-1.5">
                       <label htmlFor="spinner-free-slot" className="block text-xs text-zinc-400">
-                        Rentang Jam Kosong ({selectedDay === 'today' ? 'Hari Ini' : 'Besok'})
+                        Rentang Jam Kosong ({dayText})
                       </label>
                       <select
                         id="spinner-free-slot"
@@ -535,7 +575,7 @@ export function ActivitySpinner({
                 <div className="rounded-xl bg-[#0E0E13] border border-white/10 p-4 space-y-3">
                   <div className="space-y-1.5">
                     <label htmlFor="modal-spin-slot" className="block text-xs text-zinc-400">
-                      Masukkan ke Jam Kosong ({selectedDay === 'today' ? 'Hari Ini' : 'Besok'})
+                      Masukkan ke Jam Kosong ({dayText})
                     </label>
                     <select
                       id="modal-spin-slot"
@@ -580,7 +620,7 @@ export function ActivitySpinner({
                 </div>
               ) : (
                 <p className="text-xs text-center text-zinc-400">
-                  Belum ada jam kosong yang tersisa di {selectedDay === 'today' ? 'Hari Ini' : 'Besok'}.
+                  Belum ada jam kosong yang tersisa di {dayText}.
                 </p>
               )}
 

@@ -1,6 +1,7 @@
 export type PartnerSlot = 'partner1' | 'partner2';
 export type ScheduleOwner = PartnerSlot | 'together';
-export type DayKey = 'today' | 'tomorrow';
+export type DayKey = 'yesterday' | 'today' | 'tomorrow';
+export type EditableDayKey = 'today' | 'tomorrow';
 export type ActivityCategory =
   | 'kuliah'
   | 'kerja'
@@ -19,7 +20,7 @@ export interface PartnerProfile {
 
 export interface ScheduleItem {
   id: string;
-  day: DayKey;
+  date: string; // YYYY-MM-DD
   owner: ScheduleOwner;
   title: string;
   category: ActivityCategory;
@@ -56,10 +57,7 @@ export interface SharedWorkspaceState {
     partner2: PartnerProfile;
   };
   schedules: ScheduleItem[];
-  confirmedPersonal: {
-    today: DayConfirmationState;
-    tomorrow: DayConfirmationState;
-  };
+  confirmedByDate: Record<string, DayConfirmationState>;
   spinnerOptions: SpinnerOption[];
   lastSpin: SpinEvent | null;
 }
@@ -74,4 +72,10 @@ export interface FreeSlot {
   startTime: string;
   endTime: string;
   durationMinutes: number;
+}
+
+export type FreeForOwner = 'both' | 'partner1' | 'partner2';
+
+export interface AvailabilitySlot extends FreeSlot {
+  freeFor: FreeForOwner;
 }

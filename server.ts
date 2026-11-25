@@ -7,7 +7,7 @@ import path from 'path';
 import type {
   ActivityCategory,
   AuthenticatedUser,
-  DayKey,
+  DayConfirmationState,
   PartnerRole,
   PartnerSlot,
   ScheduleItem,
@@ -17,7 +17,7 @@ import type {
 } from './src/types.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
-const STATE_FILE = path.join(os.tmpdir(), 'vnb-schedules-state-v2.json');
+const STATE_FILE = path.join(os.tmpdir(), 'vnb-schedules-state-v3.json');
 
 // Salted scrypt verifier for the couple passcode so no plaintext secret is stored in source.
 const PASSCODE_SALT = 'vnb_couple_salt_v1';
@@ -39,7 +39,7 @@ function createSignedToken(user: AuthenticatedUser): string {
     slot: user.slot,
     name: user.name,
     role: user.role,
-    exp: Date.now() + 1000 * 60 * 60 * 24 * 7, // 7 days
+    exp: Date.now() + 1000 * 60 * 60 * 24 * 7,
     jti: crypto.randomUUID(),
   };
   const encoded = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
@@ -132,13 +132,27 @@ function createInitialState(): SharedWorkspaceState {
       },
     },
     schedules: [],
-    confirmedPersonal: {
-      today: { partner1: false, partner2: false },
-      tomorrow: { partner1: false, partner2: false },
-    },
+    confirmedByDate: {},
     spinnerOptions: [...DEFAULT_SPINNER_OPTIONS],
     lastSpin: null,
   };
+}
+
+function sanitizeConfirmedByDate(
+  raw: unknown
+): Record<string, DayConfirmationState> {
+  if (!raw || typeof raw !== 'object') return {};
+  const result: Record<string, DayConfirmationState> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(k) && v && typeof v === 'object') {
+      const entry = v as { partner1?: unknown; partner2?: unknown };
+      result[k] = {
+        partner1: Boolean(entry.partner1),
+        partner2: Boolean(entry.partner2),
+      };
+    }
+  }
+  return result;
 }
 
 function loadState(): SharedWorkspaceState {
@@ -163,17 +177,13 @@ function loadState(): SharedWorkspaceState {
             online: false,
           },
         },
-        schedules: Array.isArray(parsed.schedules) ? parsed.schedules : [],
-        confirmedPersonal: {
-          today: {
-            partner1: Boolean(parsed.confirmedPersonal?.today?.partner1),
-            partner2: Boolean(parsed.confirmedPersonal?.today?.partner2),
-          },
-          tomorrow: {
-            partner1: Boolean(parsed.confirmedPersonal?.tomorrow?.partner1),
-            partner2: Boolean(parsed.confirmedPersonal?.tomorrow?.partner2),
-          },
-        },
+        schedules: Array.isArray(parsed.schedules)
+          ? parsed.schedules.filter(
+              (s): s is ScheduleItem =>
+                Boolean(s && typeof s.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.date))
+            )
+          : [],
+        confirmedByDate: sanitizeConfirmedByDate(parsed.confirmedByDate),
         spinnerOptions:
           Array.isArray(parsed.spinnerOptions) && parsed.spinnerOptions.length > 0
             ? parsed.spinnerOptions
@@ -216,6 +226,19 @@ function recalculatePresence(): void {
   workspaceState.partners.partner2.online = now - lastSeenAt.partner2 < ONLINE_TTL_MS;
 }
 
+function isValidDateStr(d: unknown): d is string {
+  return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
+}
+
+function isDateWithinServerWindow(dateStr: string): boolean {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return false;
+  const targetMs = Date.UTC(y, m - 1, d);
+  const nowMs = Date.now();
+  const diffDays = (targetMs - nowMs) / (1000 * 60 * 60 * 24);
+  return diffDays >= -2 && diffDays <= 3;
+}
+
 function isValidTime(t: unknown): t is string {
   if (typeof t !== 'string') return false;
   return /^(([01]\d|2[0-3]):[0-5]\d|24:00)$/.test(t);
@@ -227,7 +250,15 @@ function timeMinutes(t: string): number {
   return h * 60 + m;
 }
 
-const VALID_DAYS = new Set<DayKey>(['today', 'tomorrow']);
+function getDateConf(dateStr: string): DayConfirmationState {
+  return (
+    workspaceState.confirmedByDate[dateStr] ?? {
+      partner1: false,
+      partner2: false,
+    }
+  );
+}
+
 const VALID_OWNERS = new Set<ScheduleOwner>(['partner1', 'partner2', 'together']);
 const VALID_CATEGORIES = new Set<ActivityCategory>([
   'kuliah',
@@ -489,7 +520,6 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
 
 app.get('/api/state', requireAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
-  // Sync name if this serverless instance just warmed up
   if (workspaceState.partners[authUser.slot].name.startsWith('Pasangan ')) {
     workspaceState.partners[authUser.slot].name = authUser.name;
   }
@@ -499,8 +529,9 @@ app.get('/api/state', requireAuth, (req, res) => {
 
 app.post('/api/schedules', requireAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const { day, owner, title, category, startTime, endTime } = req.body as {
-    day?: unknown;
+  const { date, clientToday, owner, title, category, startTime, endTime } = req.body as {
+    date?: unknown;
+    clientToday?: unknown;
     owner?: unknown;
     title?: unknown;
     category?: unknown;
@@ -508,8 +539,15 @@ app.post('/api/schedules', requireAuth, (req, res) => {
     endTime?: unknown;
   };
 
-  if (typeof day !== 'string' || !VALID_DAYS.has(day as DayKey)) {
-    res.status(400).json({ error: 'Pilihan hari tidak valid.' });
+  if (!isValidDateStr(date) || !isDateWithinServerWindow(date)) {
+    res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
+    return;
+  }
+
+  if (isValidDateStr(clientToday) && date < clientToday) {
+    res.status(400).json({
+      error: 'Jadwal kemarin hanya bisa dilihat sebagai riwayat dan tidak bisa ditambah.',
+    });
     return;
   }
 
@@ -525,7 +563,7 @@ app.post('/api/schedules', requireAuth, (req, res) => {
     return;
   }
 
-  const dayConf = workspaceState.confirmedPersonal[day as DayKey];
+  const dayConf = getDateConf(date);
   if (resolvedOwner === 'together' && (!dayConf.partner1 || !dayConf.partner2)) {
     res.status(400).json({
       error: 'Konfirmasi selesai isi jadwal pribadi berdua dulu sebelum mengisi Quality Time ya.',
@@ -557,7 +595,7 @@ app.post('/api/schedules', requireAuth, (req, res) => {
 
   const newItem: ScheduleItem = {
     id: `sch-${crypto.randomUUID()}`,
-    day: day as DayKey,
+    date,
     owner: resolvedOwner,
     title: title.trim(),
     category: resolvedCategory,
@@ -580,9 +618,16 @@ app.post('/api/schedules', requireAuth, (req, res) => {
 app.delete('/api/schedules/:id', requireAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
   const id = req.params.id;
+  const clientToday = req.query.clientToday;
   const target = workspaceState.schedules.find((s) => s.id === id);
   if (!target) {
     res.status(404).json({ error: 'Jadwal tidak ditemukan.' });
+    return;
+  }
+  if (isValidDateStr(clientToday) && target.date < clientToday) {
+    res.status(400).json({
+      error: 'Riwayat jadwal kemarin tidak bisa dihapus.',
+    });
     return;
   }
   if (target.owner !== authUser.slot && target.owner !== 'together') {
@@ -600,15 +645,27 @@ app.delete('/api/schedules/:id', requireAuth, (req, res) => {
 
 app.post('/api/schedules/confirm', requireAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const { day, confirmed } = req.body as { day?: unknown; confirmed?: unknown };
+  const { date, clientToday, confirmed } = req.body as {
+    date?: unknown;
+    clientToday?: unknown;
+    confirmed?: unknown;
+  };
 
-  if (typeof day !== 'string' || !VALID_DAYS.has(day as DayKey)) {
-    res.status(400).json({ error: 'Pilihan hari tidak valid.' });
+  if (!isValidDateStr(date) || !isDateWithinServerWindow(date)) {
+    res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
+    return;
+  }
+  if (isValidDateStr(clientToday) && date < clientToday) {
+    res.status(400).json({ error: 'Riwayat jadwal kemarin tidak bisa diubah.' });
     return;
   }
 
   const nextVal = typeof confirmed === 'boolean' ? confirmed : true;
-  workspaceState.confirmedPersonal[day as DayKey][authUser.slot] = nextVal;
+  const current = getDateConf(date);
+  workspaceState.confirmedByDate[date] = {
+    ...current,
+    [authUser.slot]: nextVal,
+  };
 
   persistState();
   recalculatePresence();
@@ -617,11 +674,13 @@ app.post('/api/schedules/confirm', requireAuth, (req, res) => {
 
 app.post('/api/spinner/options', requireAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const { label, day } = req.body as { label?: unknown; day?: unknown };
+  const { label, date } = req.body as { label?: unknown; date?: unknown };
 
-  const targetDay: DayKey =
-    typeof day === 'string' && VALID_DAYS.has(day as DayKey) ? (day as DayKey) : 'today';
-  const dayConf = workspaceState.confirmedPersonal[targetDay];
+  if (!isValidDateStr(date)) {
+    res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
+    return;
+  }
+  const dayConf = getDateConf(date);
   if (!dayConf.partner1 || !dayConf.partner2) {
     res.status(400).json({
       error: 'Spinner terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.',
@@ -648,12 +707,12 @@ app.post('/api/spinner/options', requireAuth, (req, res) => {
 
 app.delete('/api/spinner/options/:id', requireAuth, (req, res) => {
   const id = req.params.id;
-  const dayParam = req.query.day;
-  const targetDay: DayKey =
-    typeof dayParam === 'string' && VALID_DAYS.has(dayParam as DayKey)
-      ? (dayParam as DayKey)
-      : 'today';
-  const dayConf = workspaceState.confirmedPersonal[targetDay];
+  const dateParam = req.query.date;
+  if (!isValidDateStr(dateParam)) {
+    res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
+    return;
+  }
+  const dayConf = getDateConf(dateParam);
   if (!dayConf.partner1 || !dayConf.partner2) {
     res.status(400).json({
       error: 'Spinner terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.',
@@ -673,10 +732,19 @@ app.delete('/api/spinner/options/:id', requireAuth, (req, res) => {
 
 app.post('/api/spinner/spin', requireAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const { day } = (req.body ?? {}) as { day?: unknown };
-  const targetDay: DayKey =
-    typeof day === 'string' && VALID_DAYS.has(day as DayKey) ? (day as DayKey) : 'today';
-  const dayConf = workspaceState.confirmedPersonal[targetDay];
+  const { date, clientToday } = (req.body ?? {}) as {
+    date?: unknown;
+    clientToday?: unknown;
+  };
+  if (!isValidDateStr(date)) {
+    res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
+    return;
+  }
+  if (isValidDateStr(clientToday) && date < clientToday) {
+    res.status(400).json({ error: 'Riwayat kemarin tidak bisa diputar di spinner.' });
+    return;
+  }
+  const dayConf = getDateConf(date);
   if (!dayConf.partner1 || !dayConf.partner2) {
     res.status(400).json({
       error: 'Spinner terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.',
@@ -711,7 +779,6 @@ app.use('/api', (_req, res) => {
   res.status(404).json({ error: 'Endpoint API tidak ditemukan.' });
 });
 
-// Start standalone HTTP server when NOT running inside Vercel Serverless Functions
 if (!process.env.VERCEL) {
   (async () => {
     if (process.env.NODE_ENV !== 'production') {

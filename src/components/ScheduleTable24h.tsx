@@ -1,4 +1,4 @@
-import { BellRing, CheckCircle2, Heart, Plus, Trash2, User } from 'lucide-react';
+import { BellRing, CheckCircle2, Heart, History, Plus, Trash2, User } from 'lucide-react';
 import type {
   ActivityCategory,
   AuthenticatedUser,
@@ -12,6 +12,9 @@ import { timeToMinutes } from '../utils/freeTime';
 
 interface ScheduleTable24hProps {
   selectedDay: DayKey;
+  targetDate: string;
+  dateLabel: string;
+  isReadOnly: boolean;
   currentHour: number;
   currentUser: AuthenticatedUser;
   partner1: PartnerProfile;
@@ -64,6 +67,9 @@ function startsInHour(item: ScheduleItem, hour: number): boolean {
 
 export function ScheduleTable24h({
   selectedDay,
+  targetDate,
+  dateLabel,
+  isReadOnly,
   currentHour,
   currentUser,
   partner1,
@@ -77,7 +83,7 @@ export function ScheduleTable24h({
   onToggleConfirm,
   onPreviewAlarm,
 }: ScheduleTable24hProps) {
-  const dayItems = schedules.filter((s) => s.day === selectedDay);
+  const dayItems = schedules.filter((s) => s.date === targetDate);
   const p1Items = dayItems.filter((s) => s.owner === 'partner1');
   const p2Items = dayItems.filter((s) => s.owner === 'partner2');
   const qtItems = dayItems.filter((s) => s.owner === 'together');
@@ -93,7 +99,7 @@ export function ScheduleTable24h({
     const isTogether = owner === 'together';
 
     if (cellItems.length === 0) {
-      if (canEditCell) {
+      if (canEditCell && !isReadOnly) {
         return (
           <button
             type="button"
@@ -116,9 +122,11 @@ export function ScheduleTable24h({
 
       return (
         <div className="min-h-[40px] px-2.5 py-1.5 flex items-center text-xs text-zinc-600">
-          {isTogether && isHourMutuallyFree
-            ? 'Jam kosong (konfirmasi dulu)'
-            : 'Kosong'}
+          {isReadOnly
+            ? '—'
+            : isTogether && isHourMutuallyFree
+              ? 'Jam kosong (konfirmasi dulu)'
+              : 'Kosong'}
         </div>
       );
     }
@@ -128,7 +136,8 @@ export function ScheduleTable24h({
         {cellItems.map((item) => {
           const isStartRow = startsInHour(item, hour);
           const canDelete =
-            item.owner === currentUser.slot || item.owner === 'together';
+            !isReadOnly &&
+            (item.owner === currentUser.slot || item.owner === 'together');
 
           if (!isStartRow) {
             return (
@@ -172,15 +181,17 @@ export function ScheduleTable24h({
               </div>
 
               <div className="flex items-center gap-0.5 shrink-0">
-                <button
-                  type="button"
-                  onClick={() => onPreviewAlarm(item)}
-                  title="Tes notif alarm kegiatan ini"
-                  aria-label={`Tes alarm untuk ${item.title}`}
-                  className="w-7 h-7 rounded-md flex items-center justify-center text-zinc-400 hover:text-pink-300 hover:bg-pink-500/15 transition-colors cursor-pointer"
-                >
-                  <BellRing className="w-3.5 h-3.5" />
-                </button>
+                {!isReadOnly && (
+                  <button
+                    type="button"
+                    onClick={() => onPreviewAlarm(item)}
+                    title="Tes notif alarm kegiatan ini"
+                    aria-label={`Tes alarm untuk ${item.title}`}
+                    className="w-7 h-7 rounded-md flex items-center justify-center text-zinc-400 hover:text-pink-300 hover:bg-pink-500/15 transition-colors cursor-pointer"
+                  >
+                    <BellRing className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 {canDelete && (
                   <button
                     type="button"
@@ -202,118 +213,129 @@ export function ScheduleTable24h({
 
   return (
     <div className="rounded-2xl bg-[#14141B] border border-white/10 overflow-hidden">
-      {/* Confirmation Status & Action Bar */}
-      <div className="p-4 sm:p-5 border-b border-white/[0.08] grid grid-cols-1 md:grid-cols-2 gap-3 bg-[#101016]">
-        {/* Partner 1 Confirmation Box */}
-        <div
-          className={`rounded-xl border px-4 py-3 flex items-center justify-between gap-3 ${
-            currentUser.slot === 'partner1'
-              ? 'bg-[#171520] border-pink-400/30'
-              : 'bg-[#14141B] border-white/10'
-          }`}
-        >
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <User className="w-4 h-4 text-pink-400 shrink-0" />
-              <span className="font-display text-sm font-bold text-white truncate">
-                {partner1.name}
-              </span>
-              <span className="text-xs text-zinc-400">
-                · {partner1.online ? 'Online' : 'Offline'}
-              </span>
+      {isReadOnly ? (
+        <div className="p-4 sm:p-5 border-b border-white/[0.08] bg-[#101016] flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+          <div className="flex items-center gap-2.5 text-sm font-medium text-pink-200">
+            <History className="w-4 h-4 text-pink-400 shrink-0" />
+            <span>Riwayat Jadwal Kemarin ({dateLabel}) · Hanya Lihat</span>
+          </div>
+          <p className="text-xs text-zinc-400">
+            Jadwal kemarin tersimpan sebagai arsip dan tidak bisa diubah lagi.
+          </p>
+        </div>
+      ) : (
+        <div className="p-4 sm:p-5 border-b border-white/[0.08] grid grid-cols-1 md:grid-cols-2 gap-3 bg-[#101016]">
+          {/* Partner 1 Confirmation Box */}
+          <div
+            className={`rounded-xl border px-4 py-3 flex items-center justify-between gap-3 ${
+              currentUser.slot === 'partner1'
+                ? 'bg-[#171520] border-pink-400/30'
+                : 'bg-[#14141B] border-white/10'
+            }`}
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <User className="w-4 h-4 text-pink-400 shrink-0" />
+                <span className="font-display text-sm font-bold text-white truncate">
+                  {partner1.name}
+                </span>
+                <span className="text-xs text-zinc-400">
+                  · {partner1.online ? 'Online' : 'Offline'}
+                </span>
+              </div>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                {dayConf.partner1
+                  ? 'Sudah konfirmasi selesai isi jadwal'
+                  : 'Belum konfirmasi selesai isi jadwal'}
+              </p>
             </div>
-            <p className="text-xs text-zinc-400 mt-0.5">
-              {dayConf.partner1
-                ? 'Sudah konfirmasi selesai isi jadwal'
-                : 'Belum konfirmasi selesai isi jadwal'}
-            </p>
+
+            {currentUser.slot === 'partner1' ? (
+              dayConf.partner1 ? (
+                <button
+                  type="button"
+                  disabled={confirming}
+                  onClick={() => void onToggleConfirm(false)}
+                  className="min-h-[36px] px-3 py-1.5 rounded-lg border border-white/15 text-xs font-medium text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                >
+                  Ubah Lagi
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={confirming}
+                  onClick={() => void onToggleConfirm(true)}
+                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-pink-500 hover:bg-pink-400 disabled:opacity-60 text-zinc-950 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>{confirming ? 'Menyimpan...' : 'Konfirmasi Selesai'}</span>
+                </button>
+              )
+            ) : (
+              <CheckCircle2
+                className={`w-5 h-5 shrink-0 ${
+                  dayConf.partner1 ? 'text-pink-400' : 'text-zinc-700'
+                }`}
+              />
+            )}
           </div>
 
-          {currentUser.slot === 'partner1' ? (
-            dayConf.partner1 ? (
-              <button
-                type="button"
-                disabled={confirming}
-                onClick={() => void onToggleConfirm(false)}
-                className="min-h-[36px] px-3 py-1.5 rounded-lg border border-white/15 text-xs font-medium text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
-              >
-                Ubah Lagi
-              </button>
-            ) : (
-              <button
-                type="button"
-                disabled={confirming}
-                onClick={() => void onToggleConfirm(true)}
-                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-pink-500 hover:bg-pink-400 disabled:opacity-60 text-zinc-950 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>{confirming ? 'Menyimpan...' : 'Konfirmasi Selesai'}</span>
-              </button>
-            )
-          ) : (
-            <CheckCircle2
-              className={`w-5 h-5 shrink-0 ${
-                dayConf.partner1 ? 'text-pink-400' : 'text-zinc-700'
-              }`}
-            />
-          )}
-        </div>
-
-        {/* Partner 2 Confirmation Box */}
-        <div
-          className={`rounded-xl border px-4 py-3 flex items-center justify-between gap-3 ${
-            currentUser.slot === 'partner2'
-              ? 'bg-[#171520] border-pink-400/30'
-              : 'bg-[#14141B] border-white/10'
-          }`}
-        >
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <User className="w-4 h-4 text-pink-300 shrink-0" />
-              <span className="font-display text-sm font-bold text-white truncate">
-                {partner2.name}
-              </span>
-              <span className="text-xs text-zinc-400">
-                · {partner2.online ? 'Online' : 'Offline'}
-              </span>
+          {/* Partner 2 Confirmation Box */}
+          <div
+            className={`rounded-xl border px-4 py-3 flex items-center justify-between gap-3 ${
+              currentUser.slot === 'partner2'
+                ? 'bg-[#171520] border-pink-400/30'
+                : 'bg-[#14141B] border-white/10'
+            }`}
+          >
+            <div className="min-w-0">
+              <div className="flex items-center gap-2">
+                <User className="w-4 h-4 text-pink-300 shrink-0" />
+                <span className="font-display text-sm font-bold text-white truncate">
+                  {partner2.name}
+                </span>
+                <span className="text-xs text-zinc-400">
+                  · {partner2.online ? 'Online' : 'Offline'}
+                </span>
+              </div>
+              <p className="text-xs text-zinc-400 mt-0.5">
+                {dayConf.partner2
+                  ? 'Sudah konfirmasi selesai isi jadwal'
+                  : 'Belum konfirmasi selesai isi jadwal'}
+              </p>
             </div>
-            <p className="text-xs text-zinc-400 mt-0.5">
-              {dayConf.partner2
-                ? 'Sudah konfirmasi selesai isi jadwal'
-                : 'Belum konfirmasi selesai isi jadwal'}
-            </p>
-          </div>
 
-          {currentUser.slot === 'partner2' ? (
-            dayConf.partner2 ? (
-              <button
-                type="button"
-                disabled={confirming}
-                onClick={() => void onToggleConfirm(false)}
-                className="min-h-[36px] px-3 py-1.5 rounded-lg border border-white/15 text-xs font-medium text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
-              >
-                Ubah Lagi
-              </button>
+            {currentUser.slot === 'partner2' ? (
+              dayConf.partner2 ? (
+                <button
+                  type="button"
+                  disabled={confirming}
+                  onClick={() => void onToggleConfirm(false)}
+                  className="min-h-[36px] px-3 py-1.5 rounded-lg border border-white/15 text-xs font-medium text-zinc-200 hover:bg-white/5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                >
+                  Ubah Lagi
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={confirming}
+                  onClick={() => void onToggleConfirm(true)}
+                  className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-pink-500 hover:bg-pink-400 disabled:opacity-60 text-zinc-950 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>{confirming ? 'Menyimpan...' : 'Konfirmasi Selesai'}</span>
+                </button>
+              )
             ) : (
-              <button
-                type="button"
-                disabled={confirming}
-                onClick={() => void onToggleConfirm(true)}
-                className="min-h-[38px] px-3.5 py-1.5 rounded-xl bg-pink-500 hover:bg-pink-400 disabled:opacity-60 text-zinc-950 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer shrink-0 whitespace-nowrap"
-              >
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                <span>{confirming ? 'Menyimpan...' : 'Konfirmasi Selesai'}</span>
-              </button>
-            )
-          ) : (
-            <CheckCircle2
-              className={`w-5 h-5 shrink-0 ${
-                dayConf.partner2 ? 'text-pink-400' : 'text-zinc-700'
-              }`}
-            />
-          )}
+              <CheckCircle2
+                className={`w-5 h-5 shrink-0 ${
+                  dayConf.partner2 ? 'text-pink-400' : 'text-zinc-700'
+                }`}
+              />
+            )}
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Full 00:00 - 24:00 Schedule Table */}
       <div className="overflow-x-auto">
@@ -385,7 +407,7 @@ export function ScheduleTable24h({
                       hour,
                       'partner1',
                       p1HourItems,
-                      currentUser.slot === 'partner1',
+                      !isReadOnly && currentUser.slot === 'partner1',
                       false
                     )}
                   </td>
@@ -395,7 +417,7 @@ export function ScheduleTable24h({
                       hour,
                       'together',
                       qtHourItems,
-                      bothConfirmed,
+                      !isReadOnly && bothConfirmed,
                       isMutuallyFree
                     )}
                   </td>
@@ -405,7 +427,7 @@ export function ScheduleTable24h({
                       hour,
                       'partner2',
                       p2HourItems,
-                      currentUser.slot === 'partner2',
+                      !isReadOnly && currentUser.slot === 'partner2',
                       false
                     )}
                   </td>

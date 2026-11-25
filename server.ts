@@ -240,10 +240,97 @@ const VALID_CATEGORIES = new Set<ActivityCategory>([
 const app = express();
 app.use(express.json({ limit: '64kb' }));
 
-function extractToken(req: express.Request): string | null {
+const COOKIE_NAME = 'vnb_session';
+
+function parseSessionCookie(req: express.Request): string | null {
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return null;
+  const pairs = cookieHeader.split(';');
+  for (const pair of pairs) {
+    const eqIdx = pair.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = pair.slice(0, eqIdx).trim();
+    if (key === COOKIE_NAME) {
+      try {
+        return decodeURIComponent(pair.slice(eqIdx + 1).trim());
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+function setSessionCookie(
+  req: express.Request,
+  res: express.Response,
+  token: string
+): void {
+  const proto = req.headers['x-forwarded-proto'];
+  const isHttps =
+    req.secure ||
+    proto === 'https' ||
+    req.hostname === 'localhost' ||
+    req.hostname === '127.0.0.1';
+  const parts = [
+    `${COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    `Max-Age=${60 * 60 * 24 * 7}`,
+    'HttpOnly',
+  ];
+  if (isHttps) {
+    parts.push('SameSite=None', 'Secure', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(req: express.Request, res: express.Response): void {
+  const proto = req.headers['x-forwarded-proto'];
+  const isHttps =
+    req.secure ||
+    proto === 'https' ||
+    req.hostname === 'localhost' ||
+    req.hostname === '127.0.0.1';
+  const parts = [`${COOKIE_NAME}=`, 'Path=/', 'Max-Age=0', 'HttpOnly'];
+  if (isHttps) {
+    parts.push('SameSite=None', 'Secure', 'Partitioned');
+  } else {
+    parts.push('SameSite=Lax');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function extractAuth(req: express.Request): {
+  token: string;
+  source: 'bearer' | 'cookie';
+} | null {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) return null;
-  return authHeader.slice(7).trim();
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const bearer = authHeader.slice(7).trim();
+    if (bearer) return { token: bearer, source: 'bearer' };
+  }
+  const cookieToken = parseSessionCookie(req);
+  if (cookieToken) return { token: cookieToken, source: 'cookie' };
+  return null;
+}
+
+function verifyCookieCsrf(req: express.Request): boolean {
+  if (req.headers['x-requested-with'] === 'XMLHttpRequest') {
+    return true;
+  }
+  const origin = req.headers.origin;
+  const host = req.headers['x-forwarded-host'] || req.headers.host;
+  if (typeof origin === 'string' && typeof host === 'string') {
+    try {
+      const originHost = new URL(origin).host;
+      return originHost === host;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 interface AuthedRequest extends express.Request {
@@ -257,19 +344,27 @@ function requireAuth(
   next: express.NextFunction
 ): void {
   syncFromDiskIfNewer();
-  const token = extractToken(req);
-  if (!token) {
+  const auth = extractAuth(req);
+  if (!auth) {
     res.status(401).json({ error: 'Silakan login terlebih dahulu.' });
     return;
   }
-  const user = verifySignedToken(token);
+  if (
+    auth.source === 'cookie' &&
+    ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method) &&
+    !verifyCookieCsrf(req)
+  ) {
+    res.status(403).json({ error: 'Permintaan tidak valid.' });
+    return;
+  }
+  const user = verifySignedToken(auth.token);
   if (!user) {
     res.status(401).json({ error: 'Sesi login sudah berakhir, silakan masuk lagi.' });
     return;
   }
   lastSeenAt[user.slot] = Date.now();
   (req as AuthedRequest).authUser = user;
-  (req as AuthedRequest).authToken = token;
+  (req as AuthedRequest).authToken = auth.token;
   next();
 }
 
@@ -278,6 +373,7 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/partners-preview', (_req, res) => {
+  syncFromDiskIfNewer();
   res.json({
     partner1: {
       slot: 'partner1',
@@ -292,7 +388,34 @@ app.get('/api/partners-preview', (_req, res) => {
   });
 });
 
+app.get('/api/auth/session', (req, res) => {
+  syncFromDiskIfNewer();
+  const auth = extractAuth(req);
+  if (!auth) {
+    res.json({ authenticated: false });
+    return;
+  }
+  const user = verifySignedToken(auth.token);
+  if (!user) {
+    clearSessionCookie(req, res);
+    res.json({ authenticated: false });
+    return;
+  }
+  if (workspaceState.partners[user.slot].name.startsWith('Pasangan ')) {
+    workspaceState.partners[user.slot].name = user.name;
+  }
+  lastSeenAt[user.slot] = Date.now();
+  recalculatePresence();
+  res.json({
+    authenticated: true,
+    token: auth.token,
+    user,
+    state: workspaceState,
+  });
+});
+
 app.post('/api/auth/login', (req, res) => {
+  syncFromDiskIfNewer();
   const { name, password, slot } = req.body as {
     name?: unknown;
     password?: unknown;
@@ -344,6 +467,7 @@ app.post('/api/auth/login', (req, res) => {
   };
   const token = createSignedToken(user);
 
+  setSessionCookie(req, res, token);
   persistState();
   recalculatePresence();
 
@@ -358,6 +482,7 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
   const { authUser, authToken } = req as AuthedRequest;
   revokedTokens.add(authToken);
   lastSeenAt[authUser.slot] = 0;
+  clearSessionCookie(req, res);
   recalculatePresence();
   res.json({ ok: true });
 });

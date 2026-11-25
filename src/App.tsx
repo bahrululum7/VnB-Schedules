@@ -50,6 +50,7 @@ export default function App() {
   const [token, setToken] = useState<string | null>(null);
   const [currentUser, setCurrentUser] = useState<AuthenticatedUser | null>(null);
   const [workspace, setWorkspace] = useState<SharedWorkspaceState | null>(null);
+  const [checkingSession, setCheckingSession] = useState(true);
 
   const [selectedDay, setSelectedDay] = useState<DayKey>('today');
   const [modalOpen, setModalOpen] = useState(false);
@@ -91,6 +92,44 @@ export default function App() {
     []
   );
 
+  // Restore session from HttpOnly cookie on page refresh
+  useEffect(() => {
+    let active = true;
+    fetch('/api/auth/session', {
+      credentials: 'same-origin',
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then(
+        (
+          data: {
+            authenticated?: boolean;
+            token?: string;
+            user?: AuthenticatedUser;
+            state?: SharedWorkspaceState;
+          } | null
+        ) => {
+          if (!active) return;
+          if (data?.authenticated && data.user && data.state) {
+            latestRevisionRef.current = data.state.revision ?? 0;
+            mutationEpochRef.current = 0;
+            setToken(data.token ?? 'cookie-session');
+            setCurrentUser(data.user);
+            setWorkspace(data.state);
+          }
+        }
+      )
+      .catch(() => {
+        // Show login screen if session check fails.
+      })
+      .finally(() => {
+        if (active) setCheckingSession(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Live clock tick every 1 second for real-time display & exact alarm triggering
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -111,8 +150,15 @@ export default function App() {
       inFlight = true;
       const pollEpoch = mutationEpochRef.current;
       try {
+        const headers: Record<string, string> = {
+          'X-Requested-With': 'XMLHttpRequest',
+        };
+        if (token !== 'cookie-session') {
+          headers.Authorization = `Bearer ${token}`;
+        }
         const res = await fetch('/api/state', {
-          headers: { Authorization: `Bearer ${token}` },
+          credentials: 'same-origin',
+          headers,
         });
         if (disposed) return;
         if (res.status === 401) {
@@ -199,11 +245,18 @@ export default function App() {
   const apiFetch = useCallback(
     async (url: string, init?: RequestInit) => {
       if (!token) throw new Error('Belum login');
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+      };
+      if (token !== 'cookie-session') {
+        headers.Authorization = `Bearer ${token}`;
+      }
       const res = await fetch(url, {
         ...init,
+        credentials: 'same-origin',
         headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
+          ...headers,
           ...(init?.headers ?? {}),
         },
       });
@@ -424,6 +477,17 @@ export default function App() {
       .sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
     return upcoming[0] ?? null;
   }, [workspace, nowTime]);
+
+  if (checkingSession) {
+    return (
+      <div className="min-h-screen bg-[#0B0B0F] text-[#FAF5F7] flex items-center justify-center p-6">
+        <div className="text-center space-y-2">
+          <p className="font-display text-xl font-bold text-white">VnB Schedules</p>
+          <p className="text-sm text-pink-300">Memuat jadwal kalian...</p>
+        </div>
+      </div>
+    );
+  }
 
   if (!token || !currentUser || !workspace) {
     return <LoginGate onLoginSuccess={handleLoginSuccess} />;

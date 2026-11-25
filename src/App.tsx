@@ -72,54 +72,55 @@ export default function App() {
     return () => window.clearInterval(id);
   }, []);
 
-  // Real-time WebSocket connection once logged in
+  // HTTP polling sync every 2.5s (compatible with Vercel Serverless Functions)
   useEffect(() => {
     if (!token) return;
 
-    let ws: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
     let disposed = false;
+    let inFlight = false;
 
-    const connect = () => {
-      if (disposed) return;
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
-
-      ws.onopen = () => {
-        ws?.send(JSON.stringify({ type: 'auth', token }));
-      };
-
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data as string) as {
-            type: string;
-            payload?: unknown;
-          };
-          if (msg.type === 'state:sync' && msg.payload) {
-            setWorkspace(msg.payload as SharedWorkspaceState);
-          } else if (msg.type === 'auth:error') {
-            setToken(null);
-            setCurrentUser(null);
-            setWorkspace(null);
+    const syncState = async () => {
+      if (disposed || inFlight) return;
+      inFlight = true;
+      try {
+        const res = await fetch('/api/state', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (disposed) return;
+        if (res.status === 401) {
+          setToken(null);
+          setCurrentUser(null);
+          setWorkspace(null);
+          return;
+        }
+        if (res.ok) {
+          const data = (await res.json()) as { state?: SharedWorkspaceState };
+          if (data.state) {
+            setWorkspace(data.state);
           }
-        } catch {
-          // Ignore malformed WS message.
         }
-      };
-
-      ws.onclose = () => {
-        if (!disposed) {
-          reconnectTimer = window.setTimeout(connect, 2000);
-        }
-      };
+      } catch {
+        // Retry on next poll interval.
+      } finally {
+        inFlight = false;
+      }
     };
 
-    connect();
+    const intervalId = window.setInterval(() => {
+      void syncState();
+    }, 2500);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void syncState();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
 
     return () => {
       disposed = true;
-      if (reconnectTimer) window.clearTimeout(reconnectTimer);
-      ws?.close();
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [token]);
 

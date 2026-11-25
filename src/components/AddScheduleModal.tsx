@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { X } from 'lucide-react';
 import type {
   ActivityCategory,
@@ -67,14 +67,21 @@ export function AddScheduleModal({
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  const wasOpenRef = useRef(false);
+  const confirmedRef = useRef(confirmedPersonal);
+  confirmedRef.current = confirmedPersonal;
+
   const bothConfirmedForDay =
     confirmedPersonal[day].partner1 && confirmedPersonal[day].partner2;
 
   useEffect(() => {
-    if (open && initial) {
+    const justOpened = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
+
+    if (justOpened && initial) {
       const targetDay = initial.day;
-      const canUseTogether =
-        confirmedPersonal[targetDay].partner1 && confirmedPersonal[targetDay].partner2;
+      const conf = confirmedRef.current[targetDay];
+      const canUseTogether = conf.partner1 && conf.partner2;
       const safeOwner: ScheduleOwner =
         initial.owner === 'together' && canUseTogether
           ? 'together'
@@ -90,7 +97,7 @@ export function AddScheduleModal({
       setEndTime(initial.endTime ?? '11:00');
       setErrorMsg(null);
     }
-  }, [open, initial, currentUser.slot, confirmedPersonal]);
+  }, [open, initial, currentUser.slot]);
 
   if (!open) return null;
 
@@ -101,6 +108,10 @@ export function AddScheduleModal({
     setErrorMsg(null);
     if (!title.trim()) {
       setErrorMsg('Tulis dulu nama kegiatannya ya.');
+      return;
+    }
+    if (!startTime || !endTime || endTime <= startTime) {
+      setErrorMsg('Jam selesai harus lebih malam dari jam mulai.');
       return;
     }
     setSaving(true);

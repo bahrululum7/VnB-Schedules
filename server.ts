@@ -116,6 +116,7 @@ const DEFAULT_SPINNER_OPTIONS: SpinnerOption[] = [
 
 function createInitialState(): SharedWorkspaceState {
   return {
+    revision: 0,
     partners: {
       partner1: {
         slot: 'partner1',
@@ -147,6 +148,7 @@ function loadState(): SharedWorkspaceState {
       const parsed = JSON.parse(raw) as Partial<SharedWorkspaceState>;
       const base = createInitialState();
       return {
+        revision: typeof parsed.revision === 'number' ? parsed.revision : 0,
         partners: {
           partner1: {
             ...base.partners.partner1,
@@ -193,10 +195,18 @@ const lastSeenAt: Record<PartnerSlot, number> = {
 const ONLINE_TTL_MS = 12000;
 
 function persistState(): void {
+  workspaceState.revision = (workspaceState.revision ?? 0) + 1;
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify(workspaceState), 'utf-8');
   } catch {
     // Ignore transient temp write failures.
+  }
+}
+
+function syncFromDiskIfNewer(): void {
+  const diskState = loadState();
+  if ((diskState.revision ?? 0) > (workspaceState.revision ?? 0)) {
+    workspaceState = diskState;
   }
 }
 
@@ -208,10 +218,11 @@ function recalculatePresence(): void {
 
 function isValidTime(t: unknown): t is string {
   if (typeof t !== 'string') return false;
-  return /^([01]\d|2[0-3]):[0-5]\d$/.test(t);
+  return /^(([01]\d|2[0-3]):[0-5]\d|24:00)$/.test(t);
 }
 
 function timeMinutes(t: string): number {
+  if (t === '24:00') return 24 * 60;
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
 }
@@ -245,6 +256,7 @@ function requireAuth(
   res: express.Response,
   next: express.NextFunction
 ): void {
+  syncFromDiskIfNewer();
   const token = extractToken(req);
   if (!token) {
     res.status(401).json({ error: 'Silakan login terlebih dahulu.' });

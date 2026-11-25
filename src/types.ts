@@ -50,6 +50,7 @@ export interface DayConfirmationState {
 }
 
 export interface SharedWorkspaceState {
+  revision?: number;
   partners: {
     partner1: PartnerProfile;
     partner2: PartnerProfile;

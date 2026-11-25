@@ -63,6 +63,33 @@ export default function App() {
   const firedAlarmsRef = useRef<Set<string>>(new Set());
   const freeTimeSectionRef = useRef<HTMLElement | null>(null);
   const prevBothConfirmedRef = useRef<boolean>(false);
+  const latestRevisionRef = useRef<number>(0);
+  const mutationEpochRef = useRef<number>(0);
+
+  const applyServerState = useCallback(
+    (nextState: SharedWorkspaceState, options?: { isMutation?: boolean; pollEpoch?: number }) => {
+      const nextRev = nextState.revision ?? 0;
+      if (options?.isMutation) {
+        mutationEpochRef.current += 1;
+        latestRevisionRef.current = Math.max(latestRevisionRef.current, nextRev);
+        setWorkspace(nextState);
+        return;
+      }
+
+      if (
+        options?.pollEpoch !== undefined &&
+        options.pollEpoch !== mutationEpochRef.current
+      ) {
+        return;
+      }
+      if (nextRev < latestRevisionRef.current) {
+        return;
+      }
+      latestRevisionRef.current = nextRev;
+      setWorkspace(nextState);
+    },
+    []
+  );
 
   // Live clock tick every 1 second for real-time display & exact alarm triggering
   useEffect(() => {
@@ -82,6 +109,7 @@ export default function App() {
     const syncState = async () => {
       if (disposed || inFlight) return;
       inFlight = true;
+      const pollEpoch = mutationEpochRef.current;
       try {
         const res = await fetch('/api/state', {
           headers: { Authorization: `Bearer ${token}` },
@@ -96,7 +124,7 @@ export default function App() {
         if (res.ok) {
           const data = (await res.json()) as { state?: SharedWorkspaceState };
           if (data.state) {
-            setWorkspace(data.state);
+            applyServerState(data.state, { pollEpoch });
           }
         }
       } catch {
@@ -122,7 +150,7 @@ export default function App() {
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [token]);
+  }, [token, applyServerState]);
 
   // Trigger explosion alarm automatically when live clock matches a "today" schedule startTime
   useEffect(() => {
@@ -194,6 +222,8 @@ export default function App() {
     user: AuthenticatedUser;
     state: SharedWorkspaceState;
   }) => {
+    latestRevisionRef.current = payload.state.revision ?? 0;
+    mutationEpochRef.current = 0;
     setToken(payload.token);
     setCurrentUser(payload.user);
     setWorkspace(payload.state);
@@ -205,6 +235,8 @@ export default function App() {
     } catch {
       // Clear local session regardless.
     }
+    latestRevisionRef.current = 0;
+    mutationEpochRef.current = 0;
     setToken(null);
     setCurrentUser(null);
     setWorkspace(null);
@@ -238,13 +270,23 @@ export default function App() {
     endTime: string;
   }): Promise<string | null> => {
     try {
+      mutationEpochRef.current += 1;
       const res = await apiFetch('/api/schedules', {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
+      const raw = await res.text();
+      let data: { error?: string; state?: SharedWorkspaceState } | null = null;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = null;
+      }
+      if (!data) {
+        return `Server tidak merespons dengan benar (HTTP ${res.status}).`;
+      }
       if (!res.ok) return data.error || 'Gagal menyimpan jadwal.';
-      if (data.state) setWorkspace(data.state);
+      if (data.state) applyServerState(data.state, { isMutation: true });
       return null;
     } catch {
       return 'Koneksi ke server bermasalah.';
@@ -253,25 +295,27 @@ export default function App() {
 
   const handleDeleteSchedule = async (id: string) => {
     try {
+      mutationEpochRef.current += 1;
       const res = await apiFetch(`/api/schedules/${encodeURIComponent(id)}`, {
         method: 'DELETE',
       });
       const data = await res.json();
-      if (res.ok && data.state) setWorkspace(data.state);
+      if (res.ok && data.state) applyServerState(data.state, { isMutation: true });
     } catch {
-      // Ignored; next WS sync reconciles.
+      // Ignored; next poll reconciles.
     }
   };
 
   const handleToggleConfirm = async (nextVal: boolean) => {
     setConfirming(true);
     try {
+      mutationEpochRef.current += 1;
       const res = await apiFetch('/api/schedules/confirm', {
         method: 'POST',
         body: JSON.stringify({ day: selectedDay, confirmed: nextVal }),
       });
       const data = await res.json();
-      if (res.ok && data.state) setWorkspace(data.state);
+      if (res.ok && data.state) applyServerState(data.state, { isMutation: true });
     } catch {
       // Ignore transient error.
     } finally {
@@ -281,13 +325,14 @@ export default function App() {
 
   const handleAddSpinOption = async (label: string): Promise<string | null> => {
     try {
+      mutationEpochRef.current += 1;
       const res = await apiFetch('/api/spinner/options', {
         method: 'POST',
         body: JSON.stringify({ label, day: selectedDay }),
       });
       const data = await res.json();
       if (!res.ok) return data.error || 'Gagal menambah pilihan.';
-      if (data.state) setWorkspace(data.state);
+      if (data.state) applyServerState(data.state, { isMutation: true });
       return null;
     } catch {
       return 'Koneksi bermasalah.';
@@ -296,6 +341,7 @@ export default function App() {
 
   const handleDeleteSpinOption = async (id: string) => {
     try {
+      mutationEpochRef.current += 1;
       const res = await apiFetch(
         `/api/spinner/options/${encodeURIComponent(id)}?day=${selectedDay}`,
         {
@@ -303,7 +349,7 @@ export default function App() {
         }
       );
       const data = await res.json();
-      if (res.ok && data.state) setWorkspace(data.state);
+      if (res.ok && data.state) applyServerState(data.state, { isMutation: true });
     } catch {
       // Ignore transient error.
     }
@@ -311,13 +357,14 @@ export default function App() {
 
   const handleTriggerSpin = async (): Promise<SpinEvent | null> => {
     try {
+      mutationEpochRef.current += 1;
       const res = await apiFetch('/api/spinner/spin', {
         method: 'POST',
         body: JSON.stringify({ day: selectedDay }),
       });
       const data = await res.json();
       if (res.ok && data.state) {
-        setWorkspace(data.state);
+        applyServerState(data.state, { isMutation: true });
         return data.spinEvent as SpinEvent;
       }
       return null;

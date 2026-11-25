@@ -52,8 +52,9 @@ export function ActivitySpinner({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const lastHandledSpinId = useRef<string | null>(lastSpin?.id ?? null);
+  const freeSlotsKey = freeSlots.map((s) => `${s.startTime}-${s.endTime}`).join('|');
 
-  // Sync customStart/customEnd whenever selected slot or freeSlots change
+  // Sync customStart/customEnd only when selected slot index, day, or actual free slots change
   useEffect(() => {
     const chosen = freeSlots[selectedSlotIdx] ?? freeSlots[0];
     if (chosen) {
@@ -63,7 +64,8 @@ export function ActivitySpinner({
       setCustomStart('');
       setCustomEnd('');
     }
-  }, [selectedSlotIdx, freeSlots, selectedDay]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSlotIdx, freeSlotsKey, selectedDay]);
 
   useEffect(() => {
     setSelectedSlotIdx(0);

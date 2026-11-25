@@ -66,12 +66,28 @@ export function LoginGate({ onLoginSuccess }: LoginGateProps) {
           slot: selectedSlot,
         }),
       });
-      const data = await res.json();
+      const rawText = await res.text();
+      let data: { error?: string; token?: string; user?: AuthenticatedUser; state?: SharedWorkspaceState } | null = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = null;
+      }
+
+      if (!data) {
+        setErrorMsg(
+          `Server backend tidak merespons (HTTP ${res.status}). Pastikan aplikasi dijalankan dengan server Node.js (npm start / server.ts), bukan static file saja.`
+        );
+        return;
+      }
+
       if (!res.ok) {
         setErrorMsg(data.error || 'Gagal masuk, coba cek lagi ya.');
         return;
       }
-      onLoginSuccess(data);
+      if (data.token && data.user && data.state) {
+        onLoginSuccess({ token: data.token, user: data.user, state: data.state });
+      }
     } catch {
       setErrorMsg('Koneksi ke server lagi bermasalah, coba sebentar lagi.');
     } finally {

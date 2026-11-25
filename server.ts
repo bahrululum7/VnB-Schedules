@@ -18,7 +18,7 @@ import type {
   SpinnerOption,
 } from './src/types.ts';
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
 const STATE_FILE = path.join(os.tmpdir(), 'vnb-schedules-state-v2.json');
 
 // Salted scrypt verifier for the couple passcode so no plaintext secret is stored in source.
@@ -565,6 +565,10 @@ async function startServer() {
     persistState();
     broadcastState({ type: 'spinner:spun', payload: spinEvent });
     res.json({ spinEvent, state: workspaceState });
+  });
+
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'Endpoint API tidak ditemukan.' });
   });
 
   if (process.env.NODE_ENV !== 'production') {

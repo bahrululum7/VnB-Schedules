@@ -1,0 +1,6 @@
+{
+  "name": "VnB Schedules",
+  "description": "Website jadwal berdua yang lucu dan real-time untuk mengatur kegiatan harian, mencari jam kosong quality time, dan spin ide kegiatan bareng.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

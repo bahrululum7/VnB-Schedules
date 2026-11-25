@@ -8,6 +8,7 @@ import type {
   ActivityCategory,
   AuthenticatedUser,
   DayConfirmationState,
+  DayConfirmationTimestamps,
   PartnerRole,
   PartnerSlot,
   ScheduleItem,
@@ -18,19 +19,24 @@ import type {
 
 const PORT = Number(process.env.PORT) || 3000;
 const STATE_FILE = path.join(os.tmpdir(), 'vnb-schedules-state-v3.json');
+const KV_KEY = 'vnb_schedules_workspace_v3';
 
 // Salted scrypt verifier for the couple passcode so no plaintext secret is stored in source.
 const PASSCODE_SALT = 'vnb_couple_salt_v1';
 const DEFAULT_PASSCODE_SCRYPT_HEX =
   '59c66b193fe0dfe4240de2e0df51671051065edde5f208e84b3b6af1fd69ae52192ccfa1f6b4f27b3db345b7d6e5342f1901f10b70c22d3a3f0b15f0fb3f274b';
 
-const RUNTIME_FALLBACK_SECRET = crypto.randomBytes(32).toString('hex');
+// Deterministic fallback secret so tokens & cookies stay valid across Vercel serverless containers
+const DERIVED_FALLBACK_SECRET = crypto
+  .createHash('sha256')
+  .update(`${PASSCODE_SALT}:${DEFAULT_PASSCODE_SCRYPT_HEX}:session`)
+  .digest('hex');
 
 function getSessionSecret(): string {
   return (
     process.env.SESSION_SECRET?.trim() ||
     process.env.COUPLE_PASSCODE?.trim() ||
-    RUNTIME_FALLBACK_SECRET
+    DERIVED_FALLBACK_SECRET
   );
 }
 
@@ -132,7 +138,9 @@ function createInitialState(): SharedWorkspaceState {
       },
     },
     schedules: [],
+    deletedScheduleIds: [],
     confirmedByDate: {},
+    confirmedUpdatedAt: {},
     spinnerOptions: [...DEFAULT_SPINNER_OPTIONS],
     lastSpin: null,
   };
@@ -155,41 +163,74 @@ function sanitizeConfirmedByDate(
   return result;
 }
 
-function loadState(): SharedWorkspaceState {
+function sanitizeConfirmedUpdatedAt(
+  raw: unknown
+): Record<string, DayConfirmationTimestamps> {
+  if (!raw || typeof raw !== 'object') return {};
+  const result: Record<string, DayConfirmationTimestamps> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(k) && v && typeof v === 'object') {
+      const entry = v as { partner1?: unknown; partner2?: unknown };
+      result[k] = {
+        partner1: typeof entry.partner1 === 'number' ? entry.partner1 : 0,
+        partner2: typeof entry.partner2 === 'number' ? entry.partner2 : 0,
+      };
+    }
+  }
+  return result;
+}
+
+function normalizeState(parsed: Partial<SharedWorkspaceState>): SharedWorkspaceState {
+  const base = createInitialState();
+  const deletedList = Array.isArray(parsed.deletedScheduleIds)
+    ? parsed.deletedScheduleIds.filter((id): id is string => typeof id === 'string').slice(-300)
+    : [];
+  const deletedSet = new Set(deletedList);
+
+  return {
+    revision: typeof parsed.revision === 'number' ? parsed.revision : 0,
+    partners: {
+      partner1: {
+        ...base.partners.partner1,
+        ...(parsed.partners?.partner1 ?? {}),
+        role: 'partner1',
+        online: false,
+      },
+      partner2: {
+        ...base.partners.partner2,
+        ...(parsed.partners?.partner2 ?? {}),
+        role: 'partner2',
+        online: false,
+      },
+    },
+    schedules: Array.isArray(parsed.schedules)
+      ? parsed.schedules.filter(
+          (s): s is ScheduleItem =>
+            Boolean(
+              s &&
+                typeof s.id === 'string' &&
+                !deletedSet.has(s.id) &&
+                typeof s.date === 'string' &&
+                /^\d{4}-\d{2}-\d{2}$/.test(s.date)
+            )
+        )
+      : [],
+    deletedScheduleIds: deletedList,
+    confirmedByDate: sanitizeConfirmedByDate(parsed.confirmedByDate),
+    confirmedUpdatedAt: sanitizeConfirmedUpdatedAt(parsed.confirmedUpdatedAt),
+    spinnerOptions:
+      Array.isArray(parsed.spinnerOptions) && parsed.spinnerOptions.length > 0
+        ? parsed.spinnerOptions
+        : [...DEFAULT_SPINNER_OPTIONS],
+    lastSpin: parsed.lastSpin ?? null,
+  };
+}
+
+function loadStateFromDisk(): SharedWorkspaceState {
   try {
     if (fs.existsSync(STATE_FILE)) {
       const raw = fs.readFileSync(STATE_FILE, 'utf-8');
-      const parsed = JSON.parse(raw) as Partial<SharedWorkspaceState>;
-      const base = createInitialState();
-      return {
-        revision: typeof parsed.revision === 'number' ? parsed.revision : 0,
-        partners: {
-          partner1: {
-            ...base.partners.partner1,
-            ...(parsed.partners?.partner1 ?? {}),
-            role: 'partner1',
-            online: false,
-          },
-          partner2: {
-            ...base.partners.partner2,
-            ...(parsed.partners?.partner2 ?? {}),
-            role: 'partner2',
-            online: false,
-          },
-        },
-        schedules: Array.isArray(parsed.schedules)
-          ? parsed.schedules.filter(
-              (s): s is ScheduleItem =>
-                Boolean(s && typeof s.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(s.date))
-            )
-          : [],
-        confirmedByDate: sanitizeConfirmedByDate(parsed.confirmedByDate),
-        spinnerOptions:
-          Array.isArray(parsed.spinnerOptions) && parsed.spinnerOptions.length > 0
-            ? parsed.spinnerOptions
-            : [...DEFAULT_SPINNER_OPTIONS],
-        lastSpin: parsed.lastSpin ?? null,
-      };
+      return normalizeState(JSON.parse(raw) as Partial<SharedWorkspaceState>);
     }
   } catch {
     // Fall back to fresh state if temp state cannot be parsed.
@@ -197,26 +238,173 @@ function loadState(): SharedWorkspaceState {
   return createInitialState();
 }
 
-let workspaceState: SharedWorkspaceState = loadState();
+function getKvConfig(): { url: string; token: string } | null {
+  const url = (
+    process.env.KV_REST_API_URL ||
+    process.env.UPSTASH_REDIS_REST_URL ||
+    ''
+  ).trim();
+  const token = (
+    process.env.KV_REST_API_TOKEN ||
+    process.env.UPSTASH_REDIS_REST_TOKEN ||
+    ''
+  ).trim();
+  if (url && token) return { url: url.replace(/\/+$/, ''), token };
+  return null;
+}
+
+async function loadStateFromKv(): Promise<SharedWorkspaceState | null> {
+  const kv = getKvConfig();
+  if (!kv) return null;
+  try {
+    const res = await fetch(`${kv.url}/get/${encodeURIComponent(KV_KEY)}`, {
+      headers: { Authorization: `Bearer ${kv.token}` },
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { result?: string | null };
+    if (!body.result) return null;
+    return normalizeState(JSON.parse(body.result) as Partial<SharedWorkspaceState>);
+  } catch {
+    return null;
+  }
+}
+
+async function saveStateToKv(state: SharedWorkspaceState): Promise<void> {
+  const kv = getKvConfig();
+  if (!kv) return;
+  try {
+    await fetch(`${kv.url}/set/${encodeURIComponent(KV_KEY)}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${kv.token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(state),
+    });
+  } catch {
+    // Ignore transient KV write failures; /tmp + client reconcile cover fallback.
+  }
+}
+
+function mergeTwoStates(
+  a: SharedWorkspaceState,
+  b: SharedWorkspaceState
+): SharedWorkspaceState {
+  const deletedSet = new Set<string>([
+    ...(a.deletedScheduleIds ?? []),
+    ...(b.deletedScheduleIds ?? []),
+  ]);
+  const deletedScheduleIds = Array.from(deletedSet).slice(-300);
+
+  const scheduleMap = new Map<string, ScheduleItem>();
+  for (const item of [...a.schedules, ...b.schedules]) {
+    if (!deletedSet.has(item.id)) {
+      scheduleMap.set(item.id, item);
+    }
+  }
+  const schedules = Array.from(scheduleMap.values()).sort(
+    (x, y) => timeMinutes(x.startTime) - timeMinutes(y.startTime)
+  );
+
+  const allDates = new Set<string>([
+    ...Object.keys(a.confirmedByDate ?? {}),
+    ...Object.keys(b.confirmedByDate ?? {}),
+  ]);
+  const confirmedByDate: Record<string, DayConfirmationState> = {};
+  const confirmedUpdatedAt: Record<string, DayConfirmationTimestamps> = {};
+
+  for (const dateKey of allDates) {
+    const aConf = a.confirmedByDate?.[dateKey] ?? { partner1: false, partner2: false };
+    const bConf = b.confirmedByDate?.[dateKey] ?? { partner1: false, partner2: false };
+    const aTs = a.confirmedUpdatedAt?.[dateKey] ?? { partner1: aConf.partner1 ? 1 : 0, partner2: aConf.partner2 ? 1 : 0 };
+    const bTs = b.confirmedUpdatedAt?.[dateKey] ?? { partner1: bConf.partner1 ? 1 : 0, partner2: bConf.partner2 ? 1 : 0 };
+
+    const useB1 = bTs.partner1 > aTs.partner1 || (bTs.partner1 === aTs.partner1 && bConf.partner1);
+    const useB2 = bTs.partner2 > aTs.partner2 || (bTs.partner2 === aTs.partner2 && bConf.partner2);
+
+    confirmedByDate[dateKey] = {
+      partner1: useB1 ? bConf.partner1 : aConf.partner1,
+      partner2: useB2 ? bConf.partner2 : aConf.partner2,
+    };
+    confirmedUpdatedAt[dateKey] = {
+      partner1: Math.max(aTs.partner1, bTs.partner1),
+      partner2: Math.max(aTs.partner2, bTs.partner2),
+    };
+  }
+
+  const pickPartnerName = (nameA: string, nameB: string, slotNum: '1' | '2') => {
+    const defaultName = `Pasangan ${slotNum}`;
+    if (nameB && nameB !== defaultName) return nameB;
+    if (nameA && nameA !== defaultName) return nameA;
+    return defaultName;
+  };
+
+  const primarySpin =
+    (b.lastSpin?.spunAt ?? 0) >= (a.lastSpin?.spunAt ?? 0) ? b.lastSpin : a.lastSpin;
+
+  const spinOptMap = new Map<string, SpinnerOption>();
+  for (const opt of [...a.spinnerOptions, ...b.spinnerOptions]) {
+    spinOptMap.set(opt.id, opt);
+  }
+
+  return {
+    revision: Math.max(a.revision ?? 0, b.revision ?? 0),
+    partners: {
+      partner1: {
+        slot: 'partner1',
+        name: pickPartnerName(a.partners.partner1.name, b.partners.partner1.name, '1'),
+        role: 'partner1',
+        online: false,
+      },
+      partner2: {
+        slot: 'partner2',
+        name: pickPartnerName(a.partners.partner2.name, b.partners.partner2.name, '2'),
+        role: 'partner2',
+        online: false,
+      },
+    },
+    schedules,
+    deletedScheduleIds,
+    confirmedByDate,
+    confirmedUpdatedAt,
+    spinnerOptions:
+      spinOptMap.size > 0
+        ? Array.from(spinOptMap.values())
+        : [...DEFAULT_SPINNER_OPTIONS],
+    lastSpin: primarySpin,
+  };
+}
+
+let workspaceState: SharedWorkspaceState = loadStateFromDisk();
 const lastSeenAt: Record<PartnerSlot, number> = {
   partner1: 0,
   partner2: 0,
 };
 const ONLINE_TTL_MS = 12000;
 
-function persistState(): void {
-  workspaceState.revision = (workspaceState.revision ?? 0) + 1;
+async function persistState(): Promise<void> {
+  workspaceState.revision = Math.max(Date.now(), (workspaceState.revision ?? 0) + 1);
   try {
     fs.writeFileSync(STATE_FILE, JSON.stringify(workspaceState), 'utf-8');
   } catch {
     // Ignore transient temp write failures.
   }
+  await saveStateToKv(workspaceState);
 }
 
-function syncFromDiskIfNewer(): void {
-  const diskState = loadState();
+async function syncFromExternalStorage(): Promise<void> {
+  const diskState = loadStateFromDisk();
   if ((diskState.revision ?? 0) > (workspaceState.revision ?? 0)) {
-    workspaceState = diskState;
+    workspaceState = mergeTwoStates(workspaceState, diskState);
+  }
+  const kvState = await loadStateFromKv();
+  if (kvState && (kvState.revision ?? 0) > (workspaceState.revision ?? 0)) {
+    workspaceState = mergeTwoStates(workspaceState, kvState);
+    try {
+      fs.writeFileSync(STATE_FILE, JSON.stringify(workspaceState), 'utf-8');
+    } catch {
+      // Ignore temp write errors.
+    }
   }
 }
 
@@ -269,7 +457,7 @@ const VALID_CATEGORIES = new Set<ActivityCategory>([
 ]);
 
 const app = express();
-app.use(express.json({ limit: '64kb' }));
+app.use(express.json({ limit: '128kb' }));
 
 const COOKIE_NAME = 'vnb_session';
 
@@ -369,12 +557,12 @@ interface AuthedRequest extends express.Request {
   authToken: string;
 }
 
-function requireAuth(
+async function requireAuth(
   req: express.Request,
   res: express.Response,
   next: express.NextFunction
-): void {
-  syncFromDiskIfNewer();
+): Promise<void> {
+  await syncFromExternalStorage();
   const auth = extractAuth(req);
   if (!auth) {
     res.status(401).json({ error: 'Silakan login terlebih dahulu.' });
@@ -403,8 +591,8 @@ app.get('/api/health', (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/partners-preview', (_req, res) => {
-  syncFromDiskIfNewer();
+app.get('/api/partners-preview', async (_req, res) => {
+  await syncFromExternalStorage();
   res.json({
     partner1: {
       slot: 'partner1',
@@ -419,8 +607,8 @@ app.get('/api/partners-preview', (_req, res) => {
   });
 });
 
-app.get('/api/auth/session', (req, res) => {
-  syncFromDiskIfNewer();
+app.get('/api/auth/session', async (req, res) => {
+  await syncFromExternalStorage();
   const auth = extractAuth(req);
   if (!auth) {
     res.json({ authenticated: false });
@@ -445,8 +633,8 @@ app.get('/api/auth/session', (req, res) => {
   });
 });
 
-app.post('/api/auth/login', (req, res) => {
-  syncFromDiskIfNewer();
+app.post('/api/auth/login', async (req, res) => {
+  await syncFromExternalStorage();
   const { name, password, slot } = req.body as {
     name?: unknown;
     password?: unknown;
@@ -499,7 +687,7 @@ app.post('/api/auth/login', (req, res) => {
   const token = createSignedToken(user);
 
   setSessionCookie(req, res, token);
-  persistState();
+  await persistState();
   recalculatePresence();
 
   res.json({
@@ -527,7 +715,146 @@ app.get('/api/state', requireAuth, (req, res) => {
   res.json({ state: workspaceState });
 });
 
-app.post('/api/schedules', requireAuth, (req, res) => {
+/**
+ * Reconciles valid client-held state (from local cache / prior serverless container)
+ * into the active server container so schedules & confirmations are never dropped across cold starts.
+ */
+app.post('/api/state/reconcile', requireAuth, async (req, res) => {
+  const { authUser } = req as AuthedRequest;
+  const { schedules, deletedIds, confirmations } = (req.body ?? {}) as {
+    schedules?: unknown;
+    deletedIds?: unknown;
+    confirmations?: unknown;
+  };
+
+  let changed = false;
+
+  if (workspaceState.partners[authUser.slot].name.startsWith('Pasangan ')) {
+    workspaceState.partners[authUser.slot].name = authUser.name;
+    changed = true;
+  }
+
+  const deletedSet = new Set<string>(workspaceState.deletedScheduleIds ?? []);
+
+  if (Array.isArray(deletedIds)) {
+    for (const delId of deletedIds.slice(0, 100)) {
+      if (typeof delId !== 'string' || !delId.startsWith('sch-')) continue;
+      const existing = workspaceState.schedules.find((s) => s.id === delId);
+      if (existing && existing.owner !== authUser.slot && existing.owner !== 'together') {
+        continue;
+      }
+      if (!deletedSet.has(delId)) {
+        deletedSet.add(delId);
+        changed = true;
+      }
+      if (existing) {
+        workspaceState.schedules = workspaceState.schedules.filter((s) => s.id !== delId);
+        changed = true;
+      }
+    }
+  }
+
+  if (confirmations && typeof confirmations === 'object') {
+    workspaceState.confirmedUpdatedAt = workspaceState.confirmedUpdatedAt ?? {};
+    for (const [dateKey, rawEntry] of Object.entries(
+      confirmations as Record<string, unknown>
+    ).slice(0, 10)) {
+      if (!isValidDateStr(dateKey) || !isDateWithinServerWindow(dateKey)) continue;
+      if (!rawEntry || typeof rawEntry !== 'object') continue;
+      const entry = rawEntry as { confirmed?: unknown; updatedAt?: unknown };
+      if (typeof entry.confirmed !== 'boolean') continue;
+      const incomingTs =
+        typeof entry.updatedAt === 'number' && Number.isFinite(entry.updatedAt)
+          ? entry.updatedAt
+          : 1;
+      const currentTs =
+        workspaceState.confirmedUpdatedAt[dateKey]?.[authUser.slot] ?? 0;
+      if (incomingTs > currentTs) {
+        const curConf = getDateConf(dateKey);
+        workspaceState.confirmedByDate[dateKey] = {
+          ...curConf,
+          [authUser.slot]: entry.confirmed,
+        };
+        workspaceState.confirmedUpdatedAt[dateKey] = {
+          partner1: workspaceState.confirmedUpdatedAt[dateKey]?.partner1 ?? 0,
+          partner2: workspaceState.confirmedUpdatedAt[dateKey]?.partner2 ?? 0,
+          [authUser.slot]: incomingTs,
+        };
+        changed = true;
+      }
+    }
+  }
+
+  if (Array.isArray(schedules)) {
+    const existingIds = new Set(workspaceState.schedules.map((s) => s.id));
+    for (const rawItem of schedules.slice(0, 100)) {
+      if (!rawItem || typeof rawItem !== 'object') continue;
+      const item = rawItem as Partial<ScheduleItem>;
+      if (
+        typeof item.id !== 'string' ||
+        !item.id.startsWith('sch-') ||
+        deletedSet.has(item.id) ||
+        existingIds.has(item.id)
+      ) {
+        continue;
+      }
+      if (item.owner !== authUser.slot && item.owner !== 'together') {
+        continue;
+      }
+      if (!isValidDateStr(item.date) || !isDateWithinServerWindow(item.date)) continue;
+      if (
+        typeof item.title !== 'string' ||
+        item.title.trim().length < 1 ||
+        item.title.trim().length > 80
+      ) {
+        continue;
+      }
+      if (!isValidTime(item.startTime) || !isValidTime(item.endTime)) continue;
+      if (timeMinutes(item.endTime) <= timeMinutes(item.startTime)) continue;
+
+      const resolvedCategory: ActivityCategory =
+        typeof item.category === 'string' &&
+        VALID_CATEGORIES.has(item.category as ActivityCategory)
+          ? (item.category as ActivityCategory)
+          : item.owner === 'together'
+            ? 'quality_time'
+            : 'lainnya';
+
+      workspaceState.schedules.push({
+        id: item.id,
+        date: item.date,
+        owner: item.owner,
+        title: item.title.trim(),
+        category: resolvedCategory,
+        startTime: item.startTime,
+        endTime: item.endTime,
+        createdBy:
+          typeof item.createdBy === 'string' && item.createdBy.trim()
+            ? item.createdBy.trim().slice(0, 32)
+            : authUser.name,
+        createdAt:
+          typeof item.createdAt === 'number' && Number.isFinite(item.createdAt)
+            ? item.createdAt
+            : Date.now(),
+      });
+      existingIds.add(item.id);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    workspaceState.deletedScheduleIds = Array.from(deletedSet).slice(-300);
+    workspaceState.schedules.sort(
+      (a, b) => timeMinutes(a.startTime) - timeMinutes(b.startTime)
+    );
+    await persistState();
+  }
+
+  recalculatePresence();
+  res.json({ ok: true, state: workspaceState });
+});
+
+app.post('/api/schedules', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
   const { date, clientToday, owner, title, category, startTime, endTime } = req.body as {
     date?: unknown;
@@ -610,18 +937,25 @@ app.post('/api/schedules', requireAuth, (req, res) => {
     (a, b) => timeMinutes(a.startTime) - timeMinutes(b.startTime)
   );
 
-  persistState();
+  await persistState();
   recalculatePresence();
   res.status(201).json({ item: newItem, state: workspaceState });
 });
 
-app.delete('/api/schedules/:id', requireAuth, (req, res) => {
+app.delete('/api/schedules/:id', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
   const id = req.params.id;
   const clientToday = req.query.clientToday;
   const target = workspaceState.schedules.find((s) => s.id === id);
   if (!target) {
-    res.status(404).json({ error: 'Jadwal tidak ditemukan.' });
+    const deleted = new Set(workspaceState.deletedScheduleIds ?? []);
+    if (!deleted.has(id)) {
+      deleted.add(id);
+      workspaceState.deletedScheduleIds = Array.from(deleted).slice(-300);
+      await persistState();
+    }
+    recalculatePresence();
+    res.json({ ok: true, state: workspaceState });
     return;
   }
   if (isValidDateStr(clientToday) && target.date < clientToday) {
@@ -637,13 +971,16 @@ app.delete('/api/schedules/:id', requireAuth, (req, res) => {
     return;
   }
 
+  const deleted = new Set(workspaceState.deletedScheduleIds ?? []);
+  deleted.add(id);
+  workspaceState.deletedScheduleIds = Array.from(deleted).slice(-300);
   workspaceState.schedules = workspaceState.schedules.filter((s) => s.id !== id);
-  persistState();
+  await persistState();
   recalculatePresence();
   res.json({ ok: true, state: workspaceState });
 });
 
-app.post('/api/schedules/confirm', requireAuth, (req, res) => {
+app.post('/api/schedules/confirm', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
   const { date, clientToday, confirmed } = req.body as {
     date?: unknown;
@@ -666,13 +1003,22 @@ app.post('/api/schedules/confirm', requireAuth, (req, res) => {
     ...current,
     [authUser.slot]: nextVal,
   };
+  workspaceState.confirmedUpdatedAt = workspaceState.confirmedUpdatedAt ?? {};
+  const currentTs = workspaceState.confirmedUpdatedAt[date] ?? {
+    partner1: 0,
+    partner2: 0,
+  };
+  workspaceState.confirmedUpdatedAt[date] = {
+    ...currentTs,
+    [authUser.slot]: Date.now(),
+  };
 
-  persistState();
+  await persistState();
   recalculatePresence();
   res.json({ ok: true, state: workspaceState });
 });
 
-app.post('/api/spinner/options', requireAuth, (req, res) => {
+app.post('/api/spinner/options', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
   const { label, date } = req.body as { label?: unknown; date?: unknown };
 
@@ -700,12 +1046,12 @@ app.post('/api/spinner/options', requireAuth, (req, res) => {
   };
 
   workspaceState.spinnerOptions.push(option);
-  persistState();
+  await persistState();
   recalculatePresence();
   res.status(201).json({ option, state: workspaceState });
 });
 
-app.delete('/api/spinner/options/:id', requireAuth, (req, res) => {
+app.delete('/api/spinner/options/:id', requireAuth, async (req, res) => {
   const id = req.params.id;
   const dateParam = req.query.date;
   if (!isValidDateStr(dateParam)) {
@@ -725,12 +1071,12 @@ app.delete('/api/spinner/options/:id', requireAuth, (req, res) => {
     return;
   }
   workspaceState.spinnerOptions = workspaceState.spinnerOptions.filter((o) => o.id !== id);
-  persistState();
+  await persistState();
   recalculatePresence();
   res.json({ ok: true, state: workspaceState });
 });
 
-app.post('/api/spinner/spin', requireAuth, (req, res) => {
+app.post('/api/spinner/spin', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
   const { date, clientToday } = (req.body ?? {}) as {
     date?: unknown;
@@ -770,7 +1116,7 @@ app.post('/api/spinner/spin', requireAuth, (req, res) => {
   };
 
   workspaceState.lastSpin = spinEvent;
-  persistState();
+  await persistState();
   recalculatePresence();
   res.json({ spinEvent, state: workspaceState });
 });

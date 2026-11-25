@@ -28,6 +28,12 @@ import {
   formatShortIndonesianDate,
   timeToMinutes,
 } from './utils/freeTime';
+import {
+  findUnsyncedLocalDelta,
+  loadCachedWorkspace,
+  mergeWorkspaceStates,
+  saveCachedWorkspace,
+} from './utils/stateMerge';
 import { LoginGate } from './components/LoginGate';
 import { CoupleIllustration } from './components/CoupleIllustration';
 import { ScheduleTable24h } from './components/ScheduleTable24h';
@@ -75,6 +81,16 @@ export default function App() {
   const prevBothConfirmedRef = useRef<boolean>(false);
   const latestRevisionRef = useRef<number>(0);
   const mutationEpochRef = useRef<number>(0);
+  const workspaceRef = useRef<SharedWorkspaceState | null>(null);
+  workspaceRef.current = workspace;
+  const currentUserRef = useRef<AuthenticatedUser | null>(null);
+  currentUserRef.current = currentUser;
+  const tokenRef = useRef<string | null>(null);
+  tokenRef.current = token;
+  const deletedIdsRef = useRef<Set<string>>(
+    new Set(loadCachedWorkspace()?.deletedScheduleIds ?? [])
+  );
+  const reconcilingRef = useRef<boolean>(false);
 
   // Live calendar dates derived directly from the live clock so rollover happens automatically at 00:00:00
   const todayDate = formatLocalDateISO(nowTime);
@@ -97,13 +113,94 @@ export default function App() {
         ? `Hari Ini (${targetDateShort})`
         : `Besok (${targetDateShort})`;
 
+  const reconcileDeltaWithServer = useCallback(
+    async (
+      mergedState: SharedWorkspaceState,
+      serverState: SharedWorkspaceState,
+      authToken: string,
+      authUser: AuthenticatedUser
+    ) => {
+      if (reconcilingRef.current) return;
+      const delta = findUnsyncedLocalDelta(mergedState, serverState, authUser.slot);
+      if (!delta) return;
+
+      reconcilingRef.current = true;
+      try {
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        };
+        if (authToken !== 'cookie-session') {
+          headers.Authorization = `Bearer ${authToken}`;
+        }
+        const res = await fetch('/api/state/reconcile', {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers,
+          body: JSON.stringify(delta),
+        });
+        if (res.ok) {
+          const data = (await res.json()) as { state?: SharedWorkspaceState };
+          if (data.state) {
+            const nextMerged = mergeWorkspaceStates(
+              workspaceRef.current,
+              data.state,
+              deletedIdsRef.current
+            );
+            latestRevisionRef.current = Math.max(
+              latestRevisionRef.current,
+              nextMerged.revision ?? 0
+            );
+            workspaceRef.current = nextMerged;
+            saveCachedWorkspace(nextMerged);
+            setWorkspace(nextMerged);
+          }
+        }
+      } catch {
+        // Retry automatically on next poll if needed.
+      } finally {
+        reconcilingRef.current = false;
+      }
+    },
+    []
+  );
+
   const applyServerState = useCallback(
-    (nextState: SharedWorkspaceState, options?: { isMutation?: boolean; pollEpoch?: number }) => {
-      const nextRev = nextState.revision ?? 0;
+    (
+      nextState: SharedWorkspaceState,
+      options?: {
+        isMutation?: boolean;
+        pollEpoch?: number;
+        userOverride?: AuthenticatedUser;
+        tokenOverride?: string;
+      }
+    ) => {
+      for (const id of nextState.deletedScheduleIds ?? []) {
+        deletedIdsRef.current.add(id);
+      }
+
+      const baseLocal = workspaceRef.current ?? loadCachedWorkspace();
+
       if (options?.isMutation) {
         mutationEpochRef.current += 1;
-        latestRevisionRef.current = Math.max(latestRevisionRef.current, nextRev);
-        setWorkspace(nextState);
+        const merged = mergeWorkspaceStates(
+          baseLocal,
+          nextState,
+          deletedIdsRef.current
+        );
+        latestRevisionRef.current = Math.max(
+          latestRevisionRef.current,
+          merged.revision ?? 0
+        );
+        workspaceRef.current = merged;
+        saveCachedWorkspace(merged);
+        setWorkspace(merged);
+
+        const activeUser = options.userOverride ?? currentUserRef.current;
+        const activeToken = options.tokenOverride ?? tokenRef.current;
+        if (activeUser && activeToken) {
+          void reconcileDeltaWithServer(merged, nextState, activeToken, activeUser);
+        }
         return;
       }
 
@@ -113,13 +210,27 @@ export default function App() {
       ) {
         return;
       }
-      if (nextRev < latestRevisionRef.current) {
-        return;
+
+      const merged = mergeWorkspaceStates(
+        baseLocal,
+        nextState,
+        deletedIdsRef.current
+      );
+      latestRevisionRef.current = Math.max(
+        latestRevisionRef.current,
+        merged.revision ?? 0
+      );
+      workspaceRef.current = merged;
+      saveCachedWorkspace(merged);
+      setWorkspace(merged);
+
+      const activeUser = options?.userOverride ?? currentUserRef.current;
+      const activeToken = options?.tokenOverride ?? tokenRef.current;
+      if (activeUser && activeToken) {
+        void reconcileDeltaWithServer(merged, nextState, activeToken, activeUser);
       }
-      latestRevisionRef.current = nextRev;
-      setWorkspace(nextState);
     },
-    []
+    [reconcileDeltaWithServer]
   );
 
   // Restore session from HttpOnly cookie on page refresh
@@ -140,11 +251,14 @@ export default function App() {
         ) => {
           if (!active) return;
           if (data?.authenticated && data.user && data.state) {
-            latestRevisionRef.current = data.state.revision ?? 0;
+            const restoredToken = data.token ?? 'cookie-session';
             mutationEpochRef.current = 0;
-            setToken(data.token ?? 'cookie-session');
+            setToken(restoredToken);
             setCurrentUser(data.user);
-            setWorkspace(data.state);
+            applyServerState(data.state, {
+              userOverride: data.user,
+              tokenOverride: restoredToken,
+            });
           }
         }
       )
@@ -158,7 +272,7 @@ export default function App() {
     return () => {
       active = false;
     };
-  }, []);
+  }, [applyServerState]);
 
   // Live clock tick every 1 second for real-time display, midnight day rollover & exact alarm triggering
   useEffect(() => {
@@ -310,11 +424,13 @@ export default function App() {
     user: AuthenticatedUser;
     state: SharedWorkspaceState;
   }) => {
-    latestRevisionRef.current = payload.state.revision ?? 0;
     mutationEpochRef.current = 0;
     setToken(payload.token);
     setCurrentUser(payload.user);
-    setWorkspace(payload.state);
+    applyServerState(payload.state, {
+      userOverride: payload.user,
+      tokenOverride: payload.token,
+    });
   };
 
   const handleLogout = async () => {
@@ -325,6 +441,7 @@ export default function App() {
     }
     latestRevisionRef.current = 0;
     mutationEpochRef.current = 0;
+    workspaceRef.current = null;
     setToken(null);
     setCurrentUser(null);
     setWorkspace(null);
@@ -388,6 +505,18 @@ export default function App() {
 
   const handleDeleteSchedule = async (id: string) => {
     if (isReadOnly) return;
+    deletedIdsRef.current.add(id);
+    if (workspaceRef.current) {
+      const optimistic: SharedWorkspaceState = {
+        ...workspaceRef.current,
+        schedules: workspaceRef.current.schedules.filter((s) => s.id !== id),
+        deletedScheduleIds: Array.from(deletedIdsRef.current).slice(-300),
+      };
+      workspaceRef.current = optimistic;
+      saveCachedWorkspace(optimistic);
+      setWorkspace(optimistic);
+    }
+
     try {
       mutationEpochRef.current += 1;
       const res = await apiFetch(
@@ -399,7 +528,7 @@ export default function App() {
       const data = await res.json();
       if (res.ok && data.state) applyServerState(data.state, { isMutation: true });
     } catch {
-      // Ignored; next poll reconciles.
+      // Ignored; tombstone prevents resurrection and next poll reconciles.
     }
   };
 

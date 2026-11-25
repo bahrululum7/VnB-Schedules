@@ -50,6 +50,11 @@ export interface DayConfirmationState {
   partner2: boolean;
 }
 
+export interface DayConfirmationTimestamps {
+  partner1: number;
+  partner2: number;
+}
+
 export interface SharedWorkspaceState {
   revision?: number;
   partners: {
@@ -57,7 +62,9 @@ export interface SharedWorkspaceState {
     partner2: PartnerProfile;
   };
   schedules: ScheduleItem[];
+  deletedScheduleIds?: string[];
   confirmedByDate: Record<string, DayConfirmationState>;
+  confirmedUpdatedAt?: Record<string, DayConfirmationTimestamps>;
   spinnerOptions: SpinnerOption[];
   lastSpin: SpinEvent | null;
 }

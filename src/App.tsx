@@ -236,8 +236,9 @@ export default function App() {
   // Restore session from HttpOnly cookie on page refresh
   useEffect(() => {
     let active = true;
-    fetch('/api/auth/session', {
+    fetch(`/api/auth/session?_ts=${Date.now()}`, {
       credentials: 'same-origin',
+      cache: 'no-store',
     })
       .then((r) => (r.ok ? r.json() : null))
       .then(
@@ -300,8 +301,9 @@ export default function App() {
         if (token !== 'cookie-session') {
           headers.Authorization = `Bearer ${token}`;
         }
-        const res = await fetch('/api/state', {
+        const res = await fetch(`/api/state?_ts=${Date.now()}`, {
           credentials: 'same-origin',
+          cache: 'no-store',
           headers,
         });
         if (disposed) return;
@@ -333,12 +335,31 @@ export default function App() {
         void syncState();
       }
     };
+    const handleStorage = (e: StorageEvent) => {
+      if (e.key === 'vnb_workspace_cache_v3' && e.newValue) {
+        const cached = loadCachedWorkspace();
+        if (cached) {
+          for (const delId of cached.deletedScheduleIds ?? []) {
+            deletedIdsRef.current.add(delId);
+          }
+          const merged = mergeWorkspaceStates(
+            workspaceRef.current,
+            cached,
+            deletedIdsRef.current
+          );
+          workspaceRef.current = merged;
+          setWorkspace(merged);
+        }
+      }
+    };
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('storage', handleStorage);
 
     return () => {
       disposed = true;
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('storage', handleStorage);
     };
   }, [token, applyServerState]);
 
@@ -505,11 +526,12 @@ export default function App() {
 
   const handleDeleteSchedule = async (id: string) => {
     if (isReadOnly) return;
+    const prevSnapshot = workspaceRef.current;
     deletedIdsRef.current.add(id);
-    if (workspaceRef.current) {
+    if (prevSnapshot) {
       const optimistic: SharedWorkspaceState = {
-        ...workspaceRef.current,
-        schedules: workspaceRef.current.schedules.filter((s) => s.id !== id),
+        ...prevSnapshot,
+        schedules: prevSnapshot.schedules.filter((s) => s.id !== id),
         deletedScheduleIds: Array.from(deletedIdsRef.current).slice(-300),
       };
       workspaceRef.current = optimistic;
@@ -525,6 +547,15 @@ export default function App() {
           method: 'DELETE',
         }
       );
+      if (res.status === 400 || res.status === 403) {
+        deletedIdsRef.current.delete(id);
+        if (prevSnapshot) {
+          workspaceRef.current = prevSnapshot;
+          saveCachedWorkspace(prevSnapshot);
+          setWorkspace(prevSnapshot);
+        }
+        return;
+      }
       const data = await res.json();
       if (res.ok && data.state) applyServerState(data.state, { isMutation: true });
     } catch {

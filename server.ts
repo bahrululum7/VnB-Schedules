@@ -457,7 +457,15 @@ const VALID_CATEGORIES = new Set<ActivityCategory>([
 ]);
 
 const app = express();
+app.set('etag', false);
 app.use(express.json({ limit: '128kb' }));
+app.use('/api', (_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  next();
+});
 
 const COOKIE_NAME = 'vnb_session';
 
@@ -737,11 +745,19 @@ app.post('/api/state/reconcile', requireAuth, async (req, res) => {
   const deletedSet = new Set<string>(workspaceState.deletedScheduleIds ?? []);
 
   if (Array.isArray(deletedIds)) {
+    const ownTag = authUser.slot === 'partner1' ? 'sch-p1-' : 'sch-p2-';
     for (const delId of deletedIds.slice(0, 100)) {
       if (typeof delId !== 'string' || !delId.startsWith('sch-')) continue;
       const existing = workspaceState.schedules.find((s) => s.id === delId);
-      if (existing && existing.owner !== authUser.slot && existing.owner !== 'together') {
-        continue;
+      if (existing) {
+        if (existing.owner !== authUser.slot && existing.owner !== 'together') {
+          continue;
+        }
+      } else {
+        const isTaggedForSlot = delId.startsWith(ownTag) || delId.startsWith('sch-qt-');
+        if (!isTaggedForSlot) {
+          continue;
+        }
       }
       if (!deletedSet.has(delId)) {
         deletedSet.add(delId);
@@ -920,8 +936,11 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
         ? 'quality_time'
         : 'lainnya';
 
+  const ownerTag =
+    resolvedOwner === 'partner1' ? 'p1' : resolvedOwner === 'partner2' ? 'p2' : 'qt';
+
   const newItem: ScheduleItem = {
-    id: `sch-${crypto.randomUUID()}`,
+    id: `sch-${ownerTag}-${crypto.randomUUID()}`,
     date,
     owner: resolvedOwner,
     title: title.trim(),

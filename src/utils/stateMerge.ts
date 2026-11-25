@@ -187,15 +187,9 @@ export function findUnsyncedLocalDelta(
       !serverDeletedIds.has(item.id)
   );
 
-  const ownPrefix = userSlot === 'partner1' ? 'sch-p1-' : 'sch-p2-';
-  const pendingDeletes = (mergedState.deletedScheduleIds ?? []).filter((delId) => {
-    if (serverDeletedIds.has(delId)) return false;
-    const onServer = serverState.schedules.find((s) => s.id === delId);
-    if (onServer) {
-      return onServer.owner === userSlot || onServer.owner === 'together';
-    }
-    return delId.startsWith(ownPrefix) || delId.startsWith('sch-qt-');
-  });
+  const pendingDeletes = (mergedState.deletedScheduleIds ?? []).filter(
+    (delId) => !serverDeletedIds.has(delId)
+  );
 
   const confirmations: Record<string, { confirmed: boolean; updatedAt: number }> = {};
   for (const [dateKey, conf] of Object.entries(mergedState.confirmedByDate ?? {})) {

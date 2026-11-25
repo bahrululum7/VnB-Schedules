@@ -135,9 +135,7 @@ export function ScheduleTable24h({
       <div className="space-y-1.5">
         {cellItems.map((item) => {
           const isStartRow = startsInHour(item, hour);
-          const canDelete =
-            !isReadOnly &&
-            (item.owner === currentUser.slot || item.owner === 'together');
+          const canDelete = !isReadOnly;
 
           if (!isStartRow) {
             return (

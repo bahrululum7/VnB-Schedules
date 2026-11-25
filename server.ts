@@ -745,20 +745,9 @@ app.post('/api/state/reconcile', requireAuth, async (req, res) => {
   const deletedSet = new Set<string>(workspaceState.deletedScheduleIds ?? []);
 
   if (Array.isArray(deletedIds)) {
-    const ownTag = authUser.slot === 'partner1' ? 'sch-p1-' : 'sch-p2-';
     for (const delId of deletedIds.slice(0, 100)) {
       if (typeof delId !== 'string' || !delId.startsWith('sch-')) continue;
       const existing = workspaceState.schedules.find((s) => s.id === delId);
-      if (existing) {
-        if (existing.owner !== authUser.slot && existing.owner !== 'together') {
-          continue;
-        }
-      } else {
-        const isTaggedForSlot = delId.startsWith(ownTag) || delId.startsWith('sch-qt-');
-        if (!isTaggedForSlot) {
-          continue;
-        }
-      }
       if (!deletedSet.has(delId)) {
         deletedSet.add(delId);
         changed = true;
@@ -962,7 +951,6 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
 });
 
 app.delete('/api/schedules/:id', requireAuth, async (req, res) => {
-  const { authUser } = req as AuthedRequest;
   const id = req.params.id;
   const clientToday = req.query.clientToday;
   const target = workspaceState.schedules.find((s) => s.id === id);
@@ -980,12 +968,6 @@ app.delete('/api/schedules/:id', requireAuth, async (req, res) => {
   if (isValidDateStr(clientToday) && target.date < clientToday) {
     res.status(400).json({
       error: 'Riwayat jadwal kemarin tidak bisa dihapus.',
-    });
-    return;
-  }
-  if (target.owner !== authUser.slot && target.owner !== 'together') {
-    res.status(403).json({
-      error: 'Kamu tidak bisa menghapus jadwal pribadi pasanganmu.',
     });
     return;
   }

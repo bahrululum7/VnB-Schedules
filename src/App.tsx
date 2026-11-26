@@ -702,7 +702,12 @@ export default function App() {
       snackId?: BearSnackId;
       rewardId?: string;
       name?: string;
-    }): Promise<{ ok: boolean; message?: string; error?: string }> => {
+    }): Promise<{
+      ok: boolean;
+      message?: string;
+      error?: string;
+      milestoneTriggered?: { level: number; rewardTitle: string } | null;
+    }> => {
       try {
         mutationEpochRef.current += 1;
         const res = await apiFetch('/api/pet/action', {
@@ -713,6 +718,7 @@ export default function App() {
           ok?: boolean;
           message?: string;
           error?: string;
+          milestoneTriggered?: { level: number; rewardTitle: string } | null;
           state?: SharedWorkspaceState;
         } | null;
         if (!res.ok || !data?.ok) {
@@ -721,7 +727,11 @@ export default function App() {
         if (data.state) {
           applyServerState(data.state, { isMutation: true });
         }
-        return { ok: true, message: data.message };
+        return {
+          ok: true,
+          message: data.message,
+          milestoneTriggered: data.milestoneTriggered ?? null,
+        };
       } catch {
         return { ok: false, error: 'Koneksi ke server bermasalah.' };
       }
@@ -754,7 +764,10 @@ export default function App() {
   );
 
   const handleAdminSaveRewards = useCallback(
-    async (titles: string[]): Promise<{ ok: boolean; error?: string }> => {
+    async (
+      rewards: string[],
+      milestoneRewards: string[]
+    ): Promise<{ ok: boolean; error?: string }> => {
       if (!adminToken) {
         return { ok: false, error: 'Sesi Admin belum aktif.' };
       }
@@ -763,7 +776,7 @@ export default function App() {
         const res = await apiFetch('/api/admin/rewards', {
           method: 'PUT',
           headers: { 'X-Admin-Token': adminToken },
-          body: JSON.stringify({ rewards: titles }),
+          body: JSON.stringify({ rewards, milestoneRewards }),
         });
         if (res.status === 403) {
           setAdminToken(null);
@@ -1053,6 +1066,7 @@ export default function App() {
         ) : activePage === 'admin' ? (
           <AdminMenuPage
             rewards={(workspace.petGame ?? createInitialPetGameState(todayDate)).rewards}
+            milestoneRewards={(workspace.petGame ?? createInitialPetGameState(todayDate)).milestoneRewards}
             claimedHistory={(workspace.petGame ?? createInitialPetGameState(todayDate)).claimedHistory}
             todayDate={todayDate}
             adminToken={adminToken}

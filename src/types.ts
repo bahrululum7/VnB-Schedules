@@ -64,6 +64,7 @@ export type BearSnackId = 'berry' | 'bread' | 'honey' | 'salmon';
 export interface BearPetState {
   name: string;
   xp: number;
+  level: number;
   stage: BearGrowthStage;
   hunger: number; // 0..100 (100 = kenyang)
   hygiene: number; // 0..100 (100 = bersih)
@@ -72,13 +73,18 @@ export interface BearPetState {
   isSleeping: boolean;
   isExhausted: boolean;
   lastUpdatedAt: number;
+  lastFedAt: number;
+  lastBathedAt: number;
+  lastPlayedAt: number;
+  sleepStartedAt: number;
+  lastMilestoneLevelRewarded: number; // 0, 10, 20, 30...
 }
 
 export interface TreeMissionState {
   plantedDate: string; // YYYY-MM-DD
   lastCalendarDate: string; // YYYY-MM-DD
   cycleDay: number; // 1..3+
-  wateringsToday: number; // 0..3
+  wateringsToday: number; // 0..2
   missedDays: number; // 0..2+ (1 = melayu, >=2 = mati)
   status: TreeHealthStatus;
   totalHarvests: number;
@@ -103,13 +109,16 @@ export interface ClaimedRewardRecord {
   rewardTitle: string;
   claimedBy: string;
   claimedAt: number;
+  source?: 'npc_harvest' | 'level_milestone';
+  milestoneLevel?: number;
 }
 
 export interface PetGameState {
   pet: BearPetState;
   tree: TreeMissionState;
   inventory: InventoryState;
-  rewards: AdminRewardOption[];
+  rewards: AdminRewardOption[]; // 3 hadiah Toko NPC (jual 1 kg buah)
+  milestoneRewards: AdminRewardOption[]; // Hadiah random Level 10, 20, 30 dst.
   claimedHistory: ClaimedRewardRecord[];
   updatedAt: number;
 }

@@ -19,13 +19,21 @@ import type {
   SpinnerOption,
 } from './src/types.ts';
 import {
+  BATH_COOLDOWN_MS,
+  FEED_COOLDOWN_MS,
   FRUIT_SELL_COINS,
   MAX_FRUIT_GRAMS,
+  MAX_WATERINGS_PER_DAY,
+  PLAY_COOLDOWN_MS,
+  SLEEP_XP_MIN_MS,
   SNACK_CATALOG,
+  TREE_WATER_COOLDOWN_MS,
   advancePetAndTreeTime,
   clampStat,
   computeGrowthStage,
+  computeLevelFromXp,
   createInitialPetGameState,
+  formatRemainingDuration,
   formatServerTodayISO,
   normalizePetGameState,
 } from './src/utils/petGameEngine.ts';
@@ -834,8 +842,8 @@ app.get('/api/state', requireAuth, async (req, res) => {
   if (
     advanced.tree.lastCalendarDate !== currentPet.tree.lastCalendarDate ||
     advanced.tree.status !== currentPet.tree.status ||
-    advanced.pet.energy !== currentPet.pet.energy ||
-    advanced.pet.hunger !== currentPet.pet.hunger
+    Math.abs(advanced.pet.energy - currentPet.pet.energy) >= 0.25 ||
+    Math.abs(advanced.pet.hunger - currentPet.pet.hunger) >= 0.25
   ) {
     workspaceState.petGame = advanced;
     await persistState();
@@ -1321,25 +1329,48 @@ app.post('/api/admin/verify', requireAuth, (req, res) => {
 });
 
 app.put('/api/admin/rewards', requireAuth, requireAdmin, async (req, res) => {
-  const { rewards } = (req.body ?? {}) as { rewards?: unknown };
+  const { rewards, milestoneRewards } = (req.body ?? {}) as {
+    rewards?: unknown;
+    milestoneRewards?: unknown;
+  };
   if (!Array.isArray(rewards) || rewards.length !== 3) {
-    res.status(400).json({ error: 'Harus mengisi tepat 3 pilihan hadiah.' });
+    res.status(400).json({ error: 'Harus mengisi tepat 3 pilihan hadiah panen Toko NPC.' });
     return;
   }
-  const sanitized: Array<{ id: string; title: string }> = [];
+  const sanitizedRewards: Array<{ id: string; title: string }> = [];
   for (let i = 0; i < 3; i++) {
     const rawTitle = rewards[i];
     if (typeof rawTitle !== 'string' || rawTitle.trim().length < 1 || rawTitle.trim().length > 120) {
-      res.status(400).json({ error: `Hadiah ${i + 1} wajib diisi (maks 120 karakter).` });
+      res.status(400).json({ error: `Hadiah Toko NPC ${i + 1} wajib diisi (maks 120 karakter).` });
       return;
     }
-    sanitized.push({ id: `reward-${i + 1}`, title: rawTitle.trim() });
+    sanitizedRewards.push({ id: `reward-${i + 1}`, title: rawTitle.trim() });
   }
 
   const currentPet = normalizePetGameState(workspaceState.petGame);
+  let sanitizedMilestones = currentPet.milestoneRewards;
+
+  if (milestoneRewards !== undefined) {
+    if (!Array.isArray(milestoneRewards) || milestoneRewards.length < 1 || milestoneRewards.length > 10) {
+      res.status(400).json({ error: 'Daftar hadiah random Level 10/20/30 minimal 1 dan maksimal 10 pilihan.' });
+      return;
+    }
+    const nextMilestones: Array<{ id: string; title: string }> = [];
+    for (let i = 0; i < milestoneRewards.length; i++) {
+      const rawTitle = milestoneRewards[i];
+      if (typeof rawTitle !== 'string' || rawTitle.trim().length < 1 || rawTitle.trim().length > 120) {
+        res.status(400).json({ error: `Hadiah Level Random ${i + 1} wajib diisi (maks 120 karakter).` });
+        return;
+      }
+      nextMilestones.push({ id: `ms-${i + 1}`, title: rawTitle.trim() });
+    }
+    sanitizedMilestones = nextMilestones;
+  }
+
   workspaceState.petGame = {
     ...currentPet,
-    rewards: sanitized,
+    rewards: sanitizedRewards,
+    milestoneRewards: sanitizedMilestones,
     updatedAt: Date.now(),
   };
   await persistState();
@@ -1352,6 +1383,8 @@ app.post('/api/admin/pet/simulate-day', requireAuth, requireAdmin, async (req, r
   const todayStr = isValidDateStr(clientToday) ? clientToday : formatServerTodayISO();
   const currentPet = normalizePetGameState(workspaceState.petGame, todayStr);
   const nextPet = advancePetAndTreeTime(currentPet, todayStr, Date.now(), 1);
+  // Shift lastWateredAt back so admin simulation can immediately test day 2/3 watering cleanly
+  nextPet.tree = { ...nextPet.tree, lastWateredAt: 0 };
   workspaceState.petGame = nextPet;
   await persistState();
   recalculatePresence();
@@ -1383,9 +1416,11 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
     ...game.inventory,
     snacks: { ...game.inventory.snacks },
   };
-  let rewards = [...game.rewards];
+  const rewards = [...game.rewards];
+  const milestoneRewards = [...game.milestoneRewards];
   let claimedHistory = [...game.claimedHistory];
   let message = '';
+  let milestoneTriggered: { level: number; rewardTitle: string } | null = null;
 
   switch (action) {
     case 'rename': {
@@ -1400,30 +1435,35 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
 
     case 'sleep_toggle': {
       if (pet.isSleeping) {
+        const sleptMs = pet.sleepStartedAt > 0 ? Math.max(0, nowMs - pet.sleepStartedAt) : 0;
         pet.isSleeping = false;
+        pet.sleepStartedAt = 0;
         pet.isExhausted = pet.energy <= 20;
-        message = `${pet.name} bangun dari tidurnya!`;
+        if (sleptMs >= SLEEP_XP_MIN_MS) {
+          pet.xp += 10;
+          message = `${pet.name} bangun setelah beristirahat cukup! (+10 XP)`;
+        } else {
+          message = `${pet.name} bangun dari tidurnya! (Energi pulih 1% tiap 1 menit tidur)`;
+        }
       } else {
         pet.isSleeping = true;
+        pet.sleepStartedAt = nowMs;
         pet.isExhausted = false;
-        message = `${pet.name} mulai tidur nyenyak untuk memulihkan energi.`;
+        message = `${pet.name} mulai tidur nyenyak (+1% energi setiap 1 menit).`;
       }
       pet.lastUpdatedAt = nowMs;
       break;
     }
 
     case 'sleep_tick': {
-      if (pet.isSleeping) {
-        pet.energy = clampStat(pet.energy + 12);
-        pet.lastUpdatedAt = nowMs;
-        if (pet.energy >= 100) {
-          pet.isSleeping = false;
-          pet.isExhausted = false;
+      // Real-time sleep recovery is already computed accurately by advancePetAndTreeTime (+1%/min)
+      if (!pet.isSleeping && pet.sleepStartedAt > 0 && pet.energy >= 100) {
+        const sleptMs = Math.max(0, nowMs - pet.sleepStartedAt);
+        pet.sleepStartedAt = 0;
+        if (sleptMs >= SLEEP_XP_MIN_MS) {
           pet.xp += 15;
           pet.happiness = clampStat(pet.happiness + 10);
-          message = `${pet.name} bangun segar dengan energi penuh! (+15 XP)`;
-        } else {
-          message = `${pet.name} sedang tidur nyenyak...`;
+          message = `${pet.name} bangun segar dengan energi penuh 100%! (+15 XP)`;
         }
       }
       break;
@@ -1432,6 +1472,11 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
     case 'feed': {
       if (pet.isSleeping) {
         res.status(400).json({ error: `${pet.name} sedang tidur. Bangunkan dulu sebelum makan.` });
+        return;
+      }
+      if (pet.lastFedAt > 0 && nowMs - pet.lastFedAt < FEED_COOLDOWN_MS) {
+        const rem = formatRemainingDuration(FEED_COOLDOWN_MS - (nowMs - pet.lastFedAt));
+        res.status(400).json({ error: `${pet.name} masih kenyang. Bisa makan lagi dalam ${rem}.` });
         return;
       }
       const snack = SNACK_CATALOG.find((s) => s.id === snackId) ?? SNACK_CATALOG[0];
@@ -1447,9 +1492,10 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
       pet.happiness = clampStat(pet.happiness + snack.happinessGain);
       pet.energy = clampStat(pet.energy + snack.energyGain);
       if (pet.energy > 25) pet.isExhausted = false;
-      pet.xp += 10;
+      pet.xp += 15;
+      pet.lastFedAt = nowMs;
       pet.lastUpdatedAt = nowMs;
-      message = `${pet.name} lahap makan ${snack.name}! (+10 XP)`;
+      message = `${pet.name} lahap makan ${snack.name}! (+15 XP)`;
       break;
     }
 
@@ -1458,11 +1504,17 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
         res.status(400).json({ error: `${pet.name} sedang tidur. Bangunkan dulu untuk mandi.` });
         return;
       }
+      if (pet.lastBathedAt > 0 && nowMs - pet.lastBathedAt < BATH_COOLDOWN_MS) {
+        const rem = formatRemainingDuration(BATH_COOLDOWN_MS - (nowMs - pet.lastBathedAt));
+        res.status(400).json({ error: `${pet.name} masih wangi! Mandi lagi dalam ${rem}.` });
+        return;
+      }
       pet.hygiene = 100;
       pet.happiness = clampStat(pet.happiness + 12);
-      pet.xp += 10;
+      pet.xp += 15;
+      pet.lastBathedAt = nowMs;
       pet.lastUpdatedAt = nowMs;
-      message = `${pet.name} mandi busa wangi dan bersih berkilau! (+10 XP)`;
+      message = `${pet.name} mandi busa wangi dan bersih berkilau! (+15 XP)`;
       break;
     }
 
@@ -1478,16 +1530,22 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
         res.status(400).json({ error: `${pet.name} kelelahan! Tidurkan dulu agar energinya pulih.` });
         return;
       }
+      if (pet.lastPlayedAt > 0 && nowMs - pet.lastPlayedAt < PLAY_COOLDOWN_MS) {
+        const rem = formatRemainingDuration(PLAY_COOLDOWN_MS - (nowMs - pet.lastPlayedAt));
+        res.status(400).json({ error: `${pet.name} baru saja main. Bisa main lagi dalam ${rem}.` });
+        return;
+      }
       pet.happiness = clampStat(pet.happiness + 22);
       pet.energy = clampStat(pet.energy - 16);
-      pet.hunger = clampStat(pet.hunger - 8);
+      pet.hunger = clampStat(pet.hunger - 10);
       pet.hygiene = clampStat(pet.hygiene - 10);
-      pet.xp += 12;
+      pet.xp += 15;
+      pet.lastPlayedAt = nowMs;
       if (pet.energy <= 20) pet.isExhausted = true;
       pet.lastUpdatedAt = nowMs;
       message = pet.isExhausted
         ? `${pet.name} senang bermain tapi sekarang mulai kelelahan! Waktunya tidur.`
-        : `${pet.name} senang bermain bersama! (+12 XP)`;
+        : `${pet.name} senang bermain bersama! (+15 XP)`;
       break;
     }
 
@@ -1508,21 +1566,32 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
         return;
       }
       if (tree.status === 'fruiting') {
-        res.status(400).json({ error: 'Pohon sudah berbuah lebat! Panen buahnya dulu ya.' });
+        res.status(400).json({ error: 'Pohon sudah berbuah lebat! Petik buah 1 kg dulu ya.' });
         return;
       }
-      if (tree.wateringsToday >= 3) {
-        res.status(400).json({ error: 'Pohon sudah disiram 3x hari ini! Lanjutkan besok ya.' });
+      if (tree.wateringsToday >= MAX_WATERINGS_PER_DAY) {
+        res.status(400).json({ error: 'Pohon sudah disiram 2x hari ini! Lanjutkan besok ya.' });
+        return;
+      }
+      // 8-hour spacing required between 1st and 2nd watering on the same day
+      if (
+        tree.wateringsToday === 1 &&
+        tree.lastWateredAt > 0 &&
+        nowMs - tree.lastWateredAt < TREE_WATER_COOLDOWN_MS
+      ) {
+        const rem = formatRemainingDuration(TREE_WATER_COOLDOWN_MS - (nowMs - tree.lastWateredAt));
+        res.status(400).json({
+          error: `Siraman ke-2 berjarak 8 jam dari siraman ke-1. Tunggu ${rem} lagi ya.`,
+        });
         return;
       }
 
       tree.wateringsToday += 1;
       tree.lastWateredAt = nowMs;
-      if (tree.wateringsToday >= 3 && tree.missedDays === 1) {
-        // Recover visually once fully watered today, while keeping missedDays count for the 3-day rule
+      if (tree.wateringsToday >= MAX_WATERINGS_PER_DAY && tree.missedDays === 1) {
         tree.status = 'growing';
       }
-      if (tree.cycleDay >= 3 && tree.wateringsToday >= 3 && tree.missedDays < 2) {
+      if (tree.cycleDay >= 3 && tree.wateringsToday >= MAX_WATERINGS_PER_DAY && tree.missedDays < 2) {
         tree.status = 'fruiting';
       }
 
@@ -1535,25 +1604,24 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
 
       message =
         tree.status === 'fruiting'
-          ? `Hore! Pohon indah ${pet.name} berbuah lebat setelah dirawat 3 hari! (+15 XP)`
-          : `Berhasil menyiram pohon (${tree.wateringsToday}/3 hari ini). (+15 XP)`;
+          ? `Hore! Pohon indah ${pet.name} berbuah 1 kg di hari ke-3! Petik ke keranjang sekarang. (+15 XP)`
+          : tree.wateringsToday === 1
+            ? `Siraman ke-1/2 selesai! Siraman ke-2 bisa dilakukan 8 jam lagi. (+15 XP)`
+            : `Siraman ke-2/2 hari ini tuntas! Pohon terawat baik. (+15 XP)`;
       break;
     }
 
     case 'harvest_tree': {
       if (tree.status !== 'fruiting') {
-        res.status(400).json({ error: 'Pohon belum berbuah. Rawat dan siram 3x sehari selama 3 hari ya.' });
+        res.status(400).json({ error: 'Pohon belum berbuah. Rawat dan siram 2x sehari (jeda 8 jam) selama 3 hari ya.' });
         return;
       }
       if (inventory.fruitGrams >= MAX_FRUIT_GRAMS) {
-        res.status(400).json({ error: 'Inventory sudah penuh 1 kg (1.000 g)! Jual buahnya ke Toko NPC dulu ya.' });
+        res.status(400).json({ error: 'Keranjang & Inventory sudah penuh 1 kg (1.000 g)! Jual ke Toko NPC dulu ya.' });
         return;
       }
 
-      const yieldGrams = tree.missedDays === 0 ? 1000 : 500;
-      const beforeGrams = inventory.fruitGrams;
-      inventory.fruitGrams = Math.min(MAX_FRUIT_GRAMS, beforeGrams + yieldGrams);
-      const gainedGrams = inventory.fruitGrams - beforeGrams;
+      inventory.fruitGrams = MAX_FRUIT_GRAMS; // 1 kg tepat masuk ke keranjang & inventory
 
       tree.plantedDate = todayStr;
       tree.lastCalendarDate = todayStr;
@@ -1562,6 +1630,7 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
       tree.missedDays = 0;
       tree.status = 'growing';
       tree.totalHarvests += 1;
+      tree.lastWateredAt = 0;
 
       pet.xp += 25;
       pet.happiness = clampStat(pet.happiness + 15);
@@ -1569,7 +1638,7 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
       if (pet.energy <= 20) pet.isExhausted = true;
       pet.lastUpdatedAt = nowMs;
 
-      message = `Panen berhasil! +${gainedGrams} g masuk ke Inventory (${inventory.fruitGrams}/1.000 g). (+25 XP)`;
+      message = `Panen berhasil! 1 kg (1.000 g) buah masuk ke Keranjang & Inventory! (+25 XP)`;
       break;
     }
 
@@ -1584,22 +1653,23 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
       tree.wateringsToday = 0;
       tree.missedDays = 0;
       tree.status = 'growing';
-      message = 'Bibit pohon indah baru berhasil ditanam! Jangan lupa siram 3x sehari selama 3 hari ya.';
+      tree.lastWateredAt = 0;
+      message = 'Bibit pohon baru berhasil ditanam! Siram 2x sehari (jarak 8 jam) selama 3 hari ya.';
       break;
     }
 
     case 'sell_fruit': {
       if (inventory.fruitGrams < MAX_FRUIT_GRAMS) {
         res.status(400).json({
-          error: `Kumpulkan buah sampai 1 kg (1.000 g) dulu ya! Saat ini baru ${inventory.fruitGrams} g.`,
+          error: `Kumpulkan buah di keranjang sampai 1 kg (1.000 g) dulu ya! Saat ini baru ${inventory.fruitGrams} g.`,
         });
         return;
       }
       inventory.fruitGrams = 0;
       inventory.coins += FRUIT_SELL_COINS;
       inventory.claimTickets += 1;
-      pet.xp += 30;
-      pet.happiness = clampStat(pet.happiness + 15);
+      pet.xp += 20;
+      pet.happiness = clampStat(pet.happiness + 12);
       pet.lastUpdatedAt = nowMs;
       message = `1 kg buah terjual ke Toko NPC! +${FRUIT_SELL_COINS} Koin & +1 Tiket Klaim Hadiah!`;
       break;
@@ -1639,9 +1709,10 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
           rewardTitle: chosen.title,
           claimedBy: authUser.name,
           claimedAt: nowMs,
+          source: 'npc_harvest' as const,
         },
         ...claimedHistory,
-      ].slice(0, 50);
+      ].slice(0, 60);
       message = `Selamat! Hadiah "${chosen.title}" berhasil diklaim oleh ${authUser.name}!`;
       break;
     }
@@ -1652,20 +1723,51 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
     }
   }
 
-  pet.stage = computeGrowthStage(pet.xp);
+  pet.level = computeLevelFromXp(pet.xp);
+  pet.stage = computeGrowthStage(pet.level);
+
+  // Automatic Random Milestone Reward at Level 10, 20, 30, ...
+  const reachedMilestone = Math.floor(pet.level / 10) * 10;
+  if (
+    reachedMilestone >= 10 &&
+    reachedMilestone > pet.lastMilestoneLevelRewarded &&
+    milestoneRewards.length > 0
+  ) {
+    const randomIdx = crypto.randomInt(0, milestoneRewards.length);
+    const picked = milestoneRewards[randomIdx];
+    pet.lastMilestoneLevelRewarded = reachedMilestone;
+    milestoneTriggered = {
+      level: reachedMilestone,
+      rewardTitle: picked.title,
+    };
+    claimedHistory = [
+      {
+        id: `ms-claim-${crypto.randomUUID()}`,
+        rewardId: picked.id,
+        rewardTitle: picked.title,
+        claimedBy: `${pet.name} Lv. ${reachedMilestone} (${authUser.name})`,
+        claimedAt: nowMs,
+        source: 'level_milestone' as const,
+        milestoneLevel: reachedMilestone,
+      },
+      ...claimedHistory,
+    ].slice(0, 60);
+    message = `${message} 🎉 Level ${reachedMilestone} tercapai! Dapat hadiah random: "${picked.title}"!`;
+  }
 
   workspaceState.petGame = {
     pet,
     tree,
     inventory,
     rewards,
+    milestoneRewards,
     claimedHistory,
     updatedAt: nowMs,
   };
 
   await persistState();
   recalculatePresence();
-  res.json({ ok: true, message, state: workspaceState });
+  res.json({ ok: true, message, milestoneTriggered, state: workspaceState });
 });
 
 app.use('/api', (_req, res) => {

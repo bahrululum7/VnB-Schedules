@@ -1,20 +1,35 @@
 import { useEffect, useState } from 'react';
-import { CalendarPlus, Check, Gift, KeyRound, Lock, ShieldCheck } from 'lucide-react';
+import {
+  CalendarPlus,
+  Check,
+  Gift,
+  KeyRound,
+  Lock,
+  Plus,
+  ShieldCheck,
+  Trash2,
+  Trophy,
+} from 'lucide-react';
 import type { AdminRewardOption, ClaimedRewardRecord } from '../types';
 
 interface AdminMenuPageProps {
   rewards: AdminRewardOption[];
+  milestoneRewards: AdminRewardOption[];
   claimedHistory: ClaimedRewardRecord[];
   todayDate: string;
   adminToken: string | null;
   onVerifyPasscode: (passcode: string) => Promise<{ ok: boolean; error?: string }>;
-  onSaveRewards: (titles: string[]) => Promise<{ ok: boolean; error?: string }>;
+  onSaveRewards: (
+    rewards: string[],
+    milestoneRewards: string[]
+  ) => Promise<{ ok: boolean; error?: string }>;
   onSimulateNextDay: () => Promise<{ ok: boolean; error?: string }>;
   onLockAdmin: () => void;
 }
 
 export function AdminMenuPage({
   rewards,
+  milestoneRewards,
   claimedHistory,
   todayDate,
   adminToken,
@@ -30,6 +45,9 @@ export function AdminMenuPage({
   const [rewardInputs, setRewardInputs] = useState<string[]>(() =>
     rewards.map((r) => r.title)
   );
+  const [milestoneInputs, setMilestoneInputs] = useState<string[]>(() =>
+    milestoneRewards.map((r) => r.title)
+  );
   const [saving, setSaving] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
@@ -37,6 +55,10 @@ export function AdminMenuPage({
   useEffect(() => {
     setRewardInputs(rewards.map((r) => r.title));
   }, [rewards]);
+
+  useEffect(() => {
+    setMilestoneInputs(milestoneRewards.map((r) => r.title));
+  }, [milestoneRewards]);
 
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -57,10 +79,14 @@ export function AdminMenuPage({
     if (saving) return;
     setSaving(true);
     setNotice(null);
-    const res = await onSaveRewards(rewardInputs);
+    const cleanMilestones = milestoneInputs.map((s) => s.trim()).filter(Boolean);
+    const res = await onSaveRewards(rewardInputs, cleanMilestones);
     setSaving(false);
     if (res.ok) {
-      setNotice({ type: 'ok', text: '3 pilihan hadiah berhasil disimpan dan langsung muncul di Toko NPC.' });
+      setNotice({
+        type: 'ok',
+        text: 'Hadiah Toko NPC (3 pilihan) & Hadiah Random Level 10/20/30 berhasil disimpan.',
+      });
     } else {
       setNotice({ type: 'err', text: res.error || 'Gagal menyimpan hadiah.' });
     }
@@ -79,6 +105,16 @@ export function AdminMenuPage({
     }
   };
 
+  const handleAddMilestoneField = () => {
+    if (milestoneInputs.length >= 10) return;
+    setMilestoneInputs((prev) => [...prev, '']);
+  };
+
+  const handleRemoveMilestoneField = (idx: number) => {
+    if (milestoneInputs.length <= 1) return;
+    setMilestoneInputs((prev) => prev.filter((_, i) => i !== idx));
+  };
+
   if (!adminToken) {
     return (
       <div className="max-w-md mx-auto py-8">
@@ -91,7 +127,7 @@ export function AdminMenuPage({
               Menu Khusus Admin
             </h1>
             <p className="text-xs text-zinc-400">
-              Masukkan passcode admin untuk mengatur 3 teks hadiah game beruang dan melihat riwayat klaim.
+              Masukkan passcode admin untuk mengatur 3 hadiah panen Toko NPC & hadiah random Level 10, 20, 30.
             </p>
           </div>
 
@@ -141,10 +177,10 @@ export function AdminMenuPage({
             <span>Akses Admin Terverifikasi</span>
           </div>
           <h1 className="font-display text-2xl font-bold text-white mt-1">
-            Pengaturan 3 Hadiah Toko NPC
+            Pengaturan Hadiah Panen & Level Beruang
           </h1>
           <p className="text-xs sm:text-sm text-zinc-400 mt-1">
-            Teks hadiah di bawah ini akan tampil di Toko NPC saat pemain menukarkan 1 kg buah hasil panen.
+            Atur 3 hadiah tukar panen 1 kg di Toko NPC sekaligus daftar hadiah random saat beruang mencapai Level 10, 20, 30, dst.
           </p>
         </div>
 
@@ -171,38 +207,96 @@ export function AdminMenuPage({
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left: Edit 3 Reward Texts */}
-        <section className="lg:col-span-7 rounded-2xl bg-[#14141B] border border-white/10 p-5 sm:p-6 space-y-5">
-          <div className="flex items-center gap-2">
-            <Gift className="w-4 h-4 text-pink-400" />
-            <h2 className="font-display text-base sm:text-lg font-bold text-white">
-              Input 3 Pilihan Hadiah
-            </h2>
-          </div>
-
-          <form onSubmit={handleSave} className="space-y-4">
-            {[0, 1, 2].map((idx) => (
-              <div key={idx} className="space-y-1.5">
-                <label
-                  htmlFor={`reward-input-${idx}`}
-                  className="block text-xs font-semibold text-zinc-300"
-                >
-                  Tulisan Hadiah {idx + 1}
-                </label>
-                <input
-                  id={`reward-input-${idx}`}
-                  type="text"
-                  maxLength={120}
-                  value={rewardInputs[idx] ?? ''}
-                  onChange={(e) =>
-                    setRewardInputs((prev) => prev.map((v, i) => (i === idx ? e.target.value : v)))
-                  }
-                  placeholder={`Contoh hadiah ${idx + 1}`}
-                  className="w-full px-4 py-2.5 rounded-xl bg-[#0B0B0F] border border-white/15 focus:border-pink-400 text-white text-sm focus:outline-none"
-                  required
-                />
+        {/* Left: Edit 3 NPC Harvest Rewards + Level 10/20/30 Random Milestone Rewards */}
+        <section className="lg:col-span-7 rounded-2xl bg-[#14141B] border border-white/10 p-5 sm:p-6 space-y-6">
+          <form onSubmit={handleSave} className="space-y-6">
+            {/* Block 1: 3 NPC Harvest Rewards */}
+            <div className="space-y-4">
+              <div className="flex items-center gap-2">
+                <Gift className="w-4 h-4 text-pink-400" />
+                <h2 className="font-display text-base sm:text-lg font-bold text-white">
+                  1. Pilihan Hadiah Panen 1 kg (Toko NPC)
+                </h2>
               </div>
-            ))}
+
+              {[0, 1, 2].map((idx) => (
+                <div key={idx} className="space-y-1.5">
+                  <label
+                    htmlFor={`reward-input-${idx}`}
+                    className="block text-xs font-semibold text-zinc-300"
+                  >
+                    Tulisan Hadiah Toko NPC {idx + 1}
+                  </label>
+                  <input
+                    id={`reward-input-${idx}`}
+                    type="text"
+                    maxLength={120}
+                    value={rewardInputs[idx] ?? ''}
+                    onChange={(e) =>
+                      setRewardInputs((prev) => prev.map((v, i) => (i === idx ? e.target.value : v)))
+                    }
+                    placeholder={`Contoh hadiah panen ${idx + 1}`}
+                    className="w-full px-4 py-2.5 rounded-xl bg-[#0B0B0F] border border-white/15 focus:border-pink-400 text-white text-sm focus:outline-none"
+                    required
+                  />
+                </div>
+              ))}
+            </div>
+
+            {/* Block 2: Random Milestone Rewards (Level 10, 20, 30...) */}
+            <div className="space-y-3.5 pt-5 border-t border-white/10">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Trophy className="w-4 h-4 text-amber-400" />
+                  <h2 className="font-display text-base sm:text-lg font-bold text-white">
+                    2. Hadiah Random Level 10, 20, 30...
+                  </h2>
+                </div>
+                {milestoneInputs.length < 10 && (
+                  <button
+                    type="button"
+                    onClick={handleAddMilestoneField}
+                    className="px-3 py-1.5 rounded-lg bg-[#1D1D27] hover:bg-white/10 border border-white/10 text-xs font-semibold text-pink-200 inline-flex items-center gap-1 cursor-pointer"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Tambah Opsi</span>
+                  </button>
+                )}
+              </div>
+              <p className="text-xs text-zinc-400">
+                Sistem akan mengacak 1 hadiah dari daftar ini secara otomatis saat beruang mencapai Level 10, 20, 30, dan kelipatan 10 berikutnya.
+              </p>
+
+              <div className="space-y-2.5">
+                {milestoneInputs.map((val, idx) => (
+                  <div key={idx} className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      maxLength={120}
+                      value={val}
+                      onChange={(e) =>
+                        setMilestoneInputs((prev) =>
+                          prev.map((v, i) => (i === idx ? e.target.value : v))
+                        )
+                      }
+                      placeholder={`Opsi hadiah random level ${idx + 1}`}
+                      className="flex-1 px-4 py-2.5 rounded-xl bg-[#0B0B0F] border border-white/15 focus:border-amber-400 text-white text-sm focus:outline-none"
+                      required
+                    />
+                    {milestoneInputs.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => handleRemoveMilestoneField(idx)}
+                        aria-label={`Hapus opsi hadiah random ${idx + 1}`}
+                        className="min-h-[42px] min-w-[42px] rounded-xl bg-[#1D1D27] hover:bg-rose-500/15 border border-white/10 text-zinc-400 hover:text-rose-300 flex items-center justify-center cursor-pointer"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
 
             <div className="flex flex-wrap items-center gap-3 pt-2">
               <button
@@ -211,7 +305,7 @@ export function AdminMenuPage({
                 className="min-h-[44px] px-5 py-2.5 rounded-xl bg-pink-500 hover:bg-pink-400 disabled:opacity-60 text-zinc-950 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <Check className="w-4 h-4" />
-                <span>{saving ? 'Menyimpan...' : 'Simpan 3 Hadiah'}</span>
+                <span>{saving ? 'Menyimpan...' : 'Simpan Semua Pengaturan Hadiah'}</span>
               </button>
 
               <button
@@ -230,23 +324,28 @@ export function AdminMenuPage({
         {/* Right: Claimed History */}
         <section className="lg:col-span-5 rounded-2xl bg-[#14141B] border border-white/10 p-5 sm:p-6 space-y-4">
           <h2 className="font-display text-base sm:text-lg font-bold text-white">
-            Riwayat Klaim Hadiah ({claimedHistory.length})
+            Riwayat Klaim & Level Hadiah ({claimedHistory.length})
           </h2>
 
           {claimedHistory.length === 0 ? (
             <p className="text-xs text-zinc-400 py-4">
-              Belum ada hadiah yang diklaim pemain dari Toko NPC.
+              Belum ada hadiah yang diklaim dari Toko NPC maupun dari pencapaian Level 10/20/30.
             </p>
           ) : (
-            <div className="space-y-2.5 max-h-[380px] overflow-y-auto pr-1">
+            <div className="space-y-2.5 max-h-[480px] overflow-y-auto pr-1">
               {claimedHistory.map((item) => (
                 <div
                   key={item.id}
                   className="rounded-xl bg-[#0E0E13] border border-white/10 p-3.5 space-y-1"
                 >
-                  <p className="text-xs font-bold text-pink-200">{item.rewardTitle}</p>
+                  <p className="text-xs font-bold text-pink-200">
+                    {item.source === 'level_milestone' && item.milestoneLevel
+                      ? `[Hadiah Acak Lv. ${item.milestoneLevel}] `
+                      : '[Toko NPC 1 kg] '}
+                    {item.rewardTitle}
+                  </p>
                   <p className="text-[11px] text-zinc-400">
-                    Diklaim oleh {item.claimedBy} ·{' '}
+                    {item.claimedBy} ·{' '}
                     {new Date(item.claimedAt).toLocaleDateString('id-ID', {
                       day: 'numeric',
                       month: 'short',

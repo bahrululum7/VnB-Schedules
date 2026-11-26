@@ -36,25 +36,25 @@ export const SNACK_CATALOG: SnackCatalogItem[] = [
     hungerGain: 35,
     happinessGain: 10,
     energyGain: 5,
-    priceCoins: 15,
+    priceCoins: 20,
   },
   {
     id: 'honey',
     name: 'Madu Hutan Emas',
-    description: 'Favorit beruang (+45 Kenyang, +20 Bahagia, +12 Energi)',
+    description: 'Favorit beruang (+45 Kenyang, +20 Bahagia, +10 Energi)',
     hungerGain: 45,
     happinessGain: 20,
-    energyGain: 12,
-    priceCoins: 30,
+    energyGain: 10,
+    priceCoins: 40,
   },
   {
     id: 'salmon',
     name: 'Salmon Panggang',
-    description: 'Porsi besar (+65 Kenyang, +25 Bahagia, +15 Energi)',
+    description: 'Porsi besar (+65 Kenyang, +25 Bahagia, +14 Energi)',
     hungerGain: 65,
     happinessGain: 25,
-    energyGain: 15,
-    priceCoins: 50,
+    energyGain: 14,
+    priceCoins: 65,
   },
 ];
 
@@ -64,17 +64,55 @@ export const DEFAULT_ADMIN_REWARDS: AdminRewardOption[] = [
   { id: 'reward-3', title: 'Voucher Peluk & Pijat 15 Menit' },
 ];
 
+export const DEFAULT_MILESTONE_REWARDS: AdminRewardOption[] = [
+  { id: 'ms-1', title: 'Traktir Es Krim / Dessert Manis' },
+  { id: 'ms-2', title: 'Request Lagu / Voice Note Romantis' },
+  { id: 'ms-3', title: 'Bebas Pilih Menu Makan Malam Berdua' },
+  { id: 'ms-4', title: 'Kartu Ucapan Spesial + Peluk Hangat' },
+];
+
 export const MAX_FRUIT_GRAMS = 1000; // 1 kg maksimal
 export const FRUIT_SELL_COINS = 150;
 
+// Real-time slow pacing & anti-farming cooldowns
+export const XP_PER_LEVEL = 200; // Lv 10 = 1.800 XP, Lv 20 = 3.800 XP, Lv 30 = 5.800 XP
+export const SLEEP_ENERGY_PER_MIN = 1; // 1 menit tidur = +1% energi (100 menit untuk 0->100%)
+export const SLEEP_XP_MIN_MS = 30 * 60 * 1000; // Minimal tidur 30 menit baru dapat bonus XP bangun
+
+export const FEED_COOLDOWN_MS = 30 * 60 * 1000; // 30 menit antar makan
+export const BATH_COOLDOWN_MS = 60 * 60 * 1000; // 1 jam antar mandi
+export const PLAY_COOLDOWN_MS = 45 * 60 * 1000; // 45 menit antar main
+export const MAX_WATERINGS_PER_DAY = 2; // 2x sehari
+export const TREE_WATER_COOLDOWN_MS = 8 * 60 * 60 * 1000; // 8 jam antara siraman 1 dan 2
+
 export function clampStat(val: number): number {
-  return Math.max(0, Math.min(100, Math.round(val)));
+  const clamped = Math.max(0, Math.min(100, val));
+  return Math.round(clamped * 100) / 100;
 }
 
-export function computeGrowthStage(xp: number): BearGrowthStage {
-  if (xp >= 250) return 'adult';
-  if (xp >= 100) return 'teen';
+export function computeLevelFromXp(xp: number): number {
+  const safeXp = Math.max(0, Math.floor(xp));
+  return Math.floor(safeXp / XP_PER_LEVEL) + 1;
+}
+
+export function computeGrowthStage(level: number): BearGrowthStage {
+  if (level >= 15) return 'adult';
+  if (level >= 5) return 'teen';
   return 'baby';
+}
+
+export function formatRemainingDuration(ms: number): string {
+  const totalSec = Math.max(0, Math.ceil(ms / 1000));
+  const hours = Math.floor(totalSec / 3600);
+  const minutes = Math.floor((totalSec % 3600) / 60);
+  const seconds = totalSec % 60;
+  if (hours > 0) {
+    return `${hours}j ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}d`;
+  }
+  return `${seconds}d`;
 }
 
 export function formatServerTodayISO(date = new Date()): string {
@@ -99,14 +137,20 @@ export function createInitialPetGameState(todayStr = formatServerTodayISO()): Pe
     pet: {
       name: 'Kuma',
       xp: 0,
+      level: 1,
       stage: 'baby',
       hunger: 85,
       hygiene: 90,
-      energy: 90,
+      energy: 85,
       happiness: 85,
       isSleeping: false,
       isExhausted: false,
       lastUpdatedAt: now,
+      lastFedAt: 0,
+      lastBathedAt: 0,
+      lastPlayedAt: 0,
+      sleepStartedAt: 0,
+      lastMilestoneLevelRewarded: 0,
     },
     tree: {
       plantedDate: todayStr,
@@ -130,6 +174,7 @@ export function createInitialPetGameState(todayStr = formatServerTodayISO()): Pe
       },
     },
     rewards: DEFAULT_ADMIN_REWARDS.map((r) => ({ ...r })),
+    milestoneRewards: DEFAULT_MILESTONE_REWARDS.map((r) => ({ ...r })),
     claimedHistory: [],
     updatedAt: now,
   };
@@ -144,7 +189,11 @@ export function normalizePetGameState(
   const r = raw as Partial<PetGameState>;
 
   const rawPet = (r.pet ?? {}) as Partial<BearPetState>;
-  const xp = typeof rawPet.xp === 'number' && Number.isFinite(rawPet.xp) ? Math.max(0, Math.round(rawPet.xp)) : 0;
+  const xp =
+    typeof rawPet.xp === 'number' && Number.isFinite(rawPet.xp)
+      ? Math.max(0, Math.round(rawPet.xp))
+      : 0;
+  const level = computeLevelFromXp(xp);
   const energy = clampStat(typeof rawPet.energy === 'number' ? rawPet.energy : base.pet.energy);
   const isSleeping = Boolean(rawPet.isSleeping);
   const isExhausted = isSleeping ? false : energy <= 20 || Boolean(rawPet.isExhausted && energy < 50);
@@ -155,7 +204,8 @@ export function normalizePetGameState(
         ? rawPet.name.trim().slice(0, 24)
         : base.pet.name,
     xp,
-    stage: computeGrowthStage(xp),
+    level,
+    stage: computeGrowthStage(level),
     hunger: clampStat(typeof rawPet.hunger === 'number' ? rawPet.hunger : base.pet.hunger),
     hygiene: clampStat(typeof rawPet.hygiene === 'number' ? rawPet.hygiene : base.pet.hygiene),
     energy,
@@ -166,6 +216,27 @@ export function normalizePetGameState(
       typeof rawPet.lastUpdatedAt === 'number' && Number.isFinite(rawPet.lastUpdatedAt)
         ? rawPet.lastUpdatedAt
         : Date.now(),
+    lastFedAt:
+      typeof rawPet.lastFedAt === 'number' && Number.isFinite(rawPet.lastFedAt)
+        ? rawPet.lastFedAt
+        : 0,
+    lastBathedAt:
+      typeof rawPet.lastBathedAt === 'number' && Number.isFinite(rawPet.lastBathedAt)
+        ? rawPet.lastBathedAt
+        : 0,
+    lastPlayedAt:
+      typeof rawPet.lastPlayedAt === 'number' && Number.isFinite(rawPet.lastPlayedAt)
+        ? rawPet.lastPlayedAt
+        : 0,
+    sleepStartedAt:
+      typeof rawPet.sleepStartedAt === 'number' && Number.isFinite(rawPet.sleepStartedAt)
+        ? rawPet.sleepStartedAt
+        : 0,
+    lastMilestoneLevelRewarded:
+      typeof rawPet.lastMilestoneLevelRewarded === 'number' &&
+      Number.isFinite(rawPet.lastMilestoneLevelRewarded)
+        ? Math.max(0, Math.floor(rawPet.lastMilestoneLevelRewarded / 10) * 10)
+        : 0,
   };
 
   const rawTree = (r.tree ?? {}) as Partial<TreeMissionState>;
@@ -192,7 +263,7 @@ export function normalizePetGameState(
         : 1,
     wateringsToday:
       typeof rawTree.wateringsToday === 'number' && Number.isFinite(rawTree.wateringsToday)
-        ? Math.max(0, Math.min(3, Math.round(rawTree.wateringsToday)))
+        ? Math.max(0, Math.min(MAX_WATERINGS_PER_DAY, Math.round(rawTree.wateringsToday)))
         : 0,
     missedDays:
       typeof rawTree.missedDays === 'number' && Number.isFinite(rawTree.missedDays)
@@ -232,15 +303,32 @@ export function normalizePetGameState(
     },
   };
 
-  const rewards: AdminRewardOption[] = Array.isArray(r.rewards) && r.rewards.length === 3
-    ? r.rewards.map((item, idx) => ({
-        id: `reward-${idx + 1}`,
-        title:
-          typeof item?.title === 'string' && item.title.trim().length > 0
-            ? item.title.trim().slice(0, 120)
-            : DEFAULT_ADMIN_REWARDS[idx].title,
-      }))
-    : DEFAULT_ADMIN_REWARDS.map((item) => ({ ...item }));
+  const rewards: AdminRewardOption[] =
+    Array.isArray(r.rewards) && r.rewards.length === 3
+      ? r.rewards.map((item, idx) => ({
+          id: `reward-${idx + 1}`,
+          title:
+            typeof item?.title === 'string' && item.title.trim().length > 0
+              ? item.title.trim().slice(0, 120)
+              : DEFAULT_ADMIN_REWARDS[idx].title,
+        }))
+      : DEFAULT_ADMIN_REWARDS.map((item) => ({ ...item }));
+
+  const milestoneRewards: AdminRewardOption[] =
+    Array.isArray(r.milestoneRewards) && r.milestoneRewards.length >= 1
+      ? r.milestoneRewards
+          .filter((item) => item && typeof item.title === 'string' && item.title.trim().length > 0)
+          .slice(0, 10)
+          .map((item, idx) => ({
+            id: `ms-${idx + 1}`,
+            title: item.title.trim().slice(0, 120),
+          }))
+      : DEFAULT_MILESTONE_REWARDS.map((item) => ({ ...item }));
+
+  const finalMilestoneRewards =
+    milestoneRewards.length > 0
+      ? milestoneRewards
+      : DEFAULT_MILESTONE_REWARDS.map((item) => ({ ...item }));
 
   const claimedHistory: ClaimedRewardRecord[] = Array.isArray(r.claimedHistory)
     ? r.claimedHistory
@@ -248,7 +336,7 @@ export function normalizePetGameState(
           (c): c is ClaimedRewardRecord =>
             Boolean(c && typeof c.id === 'string' && typeof c.rewardTitle === 'string' && typeof c.claimedBy === 'string')
         )
-        .slice(-50)
+        .slice(0, 60)
     : [];
 
   return {
@@ -256,14 +344,17 @@ export function normalizePetGameState(
     tree,
     inventory,
     rewards,
+    milestoneRewards: finalMilestoneRewards,
     claimedHistory,
     updatedAt: typeof r.updatedAt === 'number' && Number.isFinite(r.updatedAt) ? r.updatedAt : Date.now(),
   };
 }
 
 /**
- * Advances Pou stats based on elapsed real-world time and rolls over calendar days
- * for the 3-day fruit tree watering mission.
+ * Advances Pou stats at realistic multi-hour pacing:
+ * - Sleeping recovers +1% energy per 1 minute (100 minutes for 0 -> 100%)
+ * - Awake stats decay gradually over ~6-9 hours
+ * - Tree checks 2x/day watering (with 8h gap enforced on action) over a 3-day cycle
  */
 export function advancePetAndTreeTime(
   state: PetGameState,
@@ -277,24 +368,26 @@ export function advancePetAndTreeTime(
   const elapsedMs = Math.max(0, nowMs - pet.lastUpdatedAt);
   const elapsedMinutes = Math.min(24 * 60, elapsedMs / 60000);
 
-  if (elapsedMinutes >= 0.25) {
+  if (elapsedMs >= 15000) {
     if (pet.isSleeping) {
-      // Recover energy smoothly while sleeping
-      const gained = Math.max(1, Math.round(elapsedMinutes * 8));
+      // 1 minute sleep = +1% energy
+      const gained = elapsedMinutes * SLEEP_ENERGY_PER_MIN;
       pet.energy = clampStat(pet.energy + gained);
-      pet.hunger = clampStat(pet.hunger - elapsedMinutes * 0.25);
+      pet.hunger = clampStat(pet.hunger - elapsedMinutes * 0.08);
+      pet.hygiene = clampStat(pet.hygiene - elapsedMinutes * 0.05);
       if (pet.energy >= 100) {
+        pet.energy = 100;
         pet.isSleeping = false;
         pet.isExhausted = false;
       }
     } else {
-      // Gradual awake decay so pet needs regular care & rest
-      pet.hunger = clampStat(pet.hunger - elapsedMinutes * 0.45);
-      pet.hygiene = clampStat(pet.hygiene - elapsedMinutes * 0.3);
-      pet.energy = clampStat(pet.energy - elapsedMinutes * 0.35);
-      if (pet.hunger < 30 || pet.hygiene < 30 || pet.energy <= 20) {
-        pet.happiness = clampStat(pet.happiness - elapsedMinutes * 0.4);
-      }
+      // Multi-hour realistic awake decay (~6-9 hours from full to empty)
+      pet.hunger = clampStat(pet.hunger - elapsedMinutes * 0.22);
+      pet.hygiene = clampStat(pet.hygiene - elapsedMinutes * 0.18);
+      pet.energy = clampStat(pet.energy - elapsedMinutes * 0.2);
+      const moodDecay =
+        pet.hunger < 25 || pet.hygiene < 25 || pet.energy <= 20 ? 0.35 : 0.14;
+      pet.happiness = clampStat(pet.happiness - elapsedMinutes * moodDecay);
       if (pet.energy <= 20) {
         pet.isExhausted = true;
       }
@@ -302,15 +395,16 @@ export function advancePetAndTreeTime(
     pet.lastUpdatedAt = nowMs;
   }
 
-  // Tree day rollover
-  const calendarDiff = forcedDaysAdvance > 0
-    ? forcedDaysAdvance
-    : calendarDaysBetween(tree.lastCalendarDate, todayStr);
+  // Tree day rollover (requires 2 waterings/day)
+  const calendarDiff =
+    forcedDaysAdvance > 0
+      ? forcedDaysAdvance
+      : calendarDaysBetween(tree.lastCalendarDate, todayStr);
 
   if (calendarDiff > 0) {
     for (let step = 0; step < Math.min(calendarDiff, 10); step++) {
       if (tree.status !== 'dead' && tree.status !== 'fruiting') {
-        if (tree.wateringsToday < 3) {
+        if (tree.wateringsToday < MAX_WATERINGS_PER_DAY) {
           tree.missedDays += 1;
         }
         tree.cycleDay += 1;
@@ -324,14 +418,14 @@ export function advancePetAndTreeTime(
           tree.status = 'growing';
         }
       } else if (tree.status === 'fruiting') {
-        // Ready to harvest; reset daily counter without decaying fruit
         tree.wateringsToday = 0;
       }
     }
     tree.lastCalendarDate = todayStr;
   }
 
-  pet.stage = computeGrowthStage(pet.xp);
+  pet.level = computeLevelFromXp(pet.xp);
+  pet.stage = computeGrowthStage(pet.level);
 
   return {
     ...state,

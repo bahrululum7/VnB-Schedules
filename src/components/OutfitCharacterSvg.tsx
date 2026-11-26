@@ -972,7 +972,7 @@ export function OutfitCharacterSvg({
       aria-label={isFemale ? 'Karakter Wanita' : 'Karakter Lelaki'}
     >
       {/* Studio Ground Shadow */}
-      <ellipse cx="120" cy="356" rx="54" ry="9" fill="#050508" opacity="0.7" />
+      <ellipse cx="120" cy="356" rx="54" ry="9" fill="#181822" opacity="0.16" />
 
       {/* Back Hair */}
       {renderBackHair()}

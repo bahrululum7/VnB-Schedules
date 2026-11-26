@@ -666,20 +666,28 @@ export function OutfitGamePage({
                 if (soundEnabled) playPopSound(true);
                 setActiveGender('female');
               }}
-              className={`rounded-2xl p-3 border text-center transition-all cursor-pointer flex flex-col items-center ${
+              className={`relative overflow-hidden rounded-2xl p-3 border text-center transition-all cursor-pointer flex flex-col items-center bg-white/90 backdrop-blur-md ${
                 activeGender === 'female'
-                  ? 'bg-gradient-to-b from-pink-500/15 to-[#0E0E13] border-pink-400 shadow-lg shadow-pink-500/10'
-                  : 'bg-[#0E0E13] border-white/10 hover:border-white/25'
+                  ? 'border-pink-400 ring-2 ring-pink-400/50 shadow-lg shadow-pink-500/15'
+                  : 'border-white/60 hover:border-pink-300'
               }`}
             >
-              <div className="w-full aspect-[240/360] max-h-[320px] flex items-center justify-center">
+              <div
+                className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white via-pink-50/70 to-white/95 backdrop-blur-xl"
+                aria-hidden="true"
+              />
+              <div
+                className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-36 h-36 rounded-full bg-pink-200/45 blur-2xl"
+                aria-hidden="true"
+              />
+              <div className="relative z-10 w-full aspect-[240/360] max-h-[320px] flex items-center justify-center">
                 <OutfitCharacterSvg gender="female" outfit={outfits.female} />
               </div>
-              <div className="mt-2 pt-2 border-t border-white/[0.07] w-full">
-                <p className="font-display text-sm font-bold text-white truncate">
+              <div className="relative z-10 mt-2 pt-2 border-t border-zinc-200/80 w-full">
+                <p className="font-display text-sm font-bold text-zinc-900 truncate">
                   Wanita
                 </p>
-                <p className="text-[11px] text-pink-300 truncate">
+                <p className="text-[11px] font-medium text-pink-600 truncate">
                   {activeGender === 'female' ? 'Sedang didandani' : partner1Name}
                 </p>
               </div>
@@ -693,20 +701,28 @@ export function OutfitGamePage({
                 if (soundEnabled) playPopSound(true);
                 setActiveGender('male');
               }}
-              className={`rounded-2xl p-3 border text-center transition-all cursor-pointer flex flex-col items-center ${
+              className={`relative overflow-hidden rounded-2xl p-3 border text-center transition-all cursor-pointer flex flex-col items-center bg-white/90 backdrop-blur-md ${
                 activeGender === 'male'
-                  ? 'bg-gradient-to-b from-pink-500/15 to-[#0E0E13] border-pink-400 shadow-lg shadow-pink-500/10'
-                  : 'bg-[#0E0E13] border-white/10 hover:border-white/25'
+                  ? 'border-pink-400 ring-2 ring-pink-400/50 shadow-lg shadow-pink-500/15'
+                  : 'border-white/60 hover:border-pink-300'
               }`}
             >
-              <div className="w-full aspect-[240/360] max-h-[320px] flex items-center justify-center">
+              <div
+                className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white via-pink-50/70 to-white/95 backdrop-blur-xl"
+                aria-hidden="true"
+              />
+              <div
+                className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-36 h-36 rounded-full bg-pink-200/45 blur-2xl"
+                aria-hidden="true"
+              />
+              <div className="relative z-10 w-full aspect-[240/360] max-h-[320px] flex items-center justify-center">
                 <OutfitCharacterSvg gender="male" outfit={outfits.male} />
               </div>
-              <div className="mt-2 pt-2 border-t border-white/[0.07] w-full">
-                <p className="font-display text-sm font-bold text-white truncate">
+              <div className="relative z-10 mt-2 pt-2 border-t border-zinc-200/80 w-full">
+                <p className="font-display text-sm font-bold text-zinc-900 truncate">
                   Lelaki
                 </p>
-                <p className="text-[11px] text-pink-300 truncate">
+                <p className="text-[11px] font-medium text-pink-600 truncate">
                   {activeGender === 'male' ? 'Sedang didandani' : partner2Name}
                 </p>
               </div>

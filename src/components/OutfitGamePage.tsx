@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react';
-import { motion } from 'motion/react';
 import { Check, Eraser, Palette, Save, Shirt, Shuffle, Sparkles } from 'lucide-react';
 import type {
   AccessoryId,
@@ -19,7 +18,7 @@ import type {
   ShirtStyleId,
   ShoesStyleId,
 } from '../types/outfit';
-import { OutfitCharacterSvg } from './OutfitCharacterSvg';
+import { OutfitStage3D } from './OutfitStage3D';
 import { playPopSound } from '../utils/sound';
 
 const STORAGE_KEY = 'vnb_couple_outfits_v1';
@@ -630,12 +629,45 @@ export function OutfitGamePage({
 
       {/* Main Split Stage + Wardrobe Drawer */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left: Interactive Couple Stage */}
-        <section className="lg:col-span-5 rounded-2xl bg-[#14141B] border border-white/10 p-5 space-y-4">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-semibold text-zinc-300">
-              Panggung Pasangan ({activeGender === 'female' ? 'Wanita Aktif' : 'Lelaki Aktif'})
-            </span>
+        {/* Left: Interactive 3D Couple Lookbook Studio */}
+        <section className="lg:col-span-6 rounded-2xl bg-[#14141B] border border-white/10 p-4 sm:p-5 space-y-3.5">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-zinc-200">
+                Panggung 3D ({activeGender === 'female' ? 'Wanita' : 'Lelaki'})
+              </span>
+              <div className="inline-flex p-0.5 rounded-lg bg-[#0B0B0F] border border-white/10">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (soundEnabled && activeGender !== 'female') playPopSound(true);
+                    setActiveGender('female');
+                  }}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                    activeGender === 'female'
+                      ? 'bg-pink-500 text-zinc-950'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  Wanita
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (soundEnabled && activeGender !== 'male') playPopSound(true);
+                    setActiveGender('male');
+                  }}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold transition-colors cursor-pointer ${
+                    activeGender === 'male'
+                      ? 'bg-pink-500 text-zinc-950'
+                      : 'text-zinc-400 hover:text-white'
+                  }`}
+                >
+                  Lelaki
+                </button>
+              </div>
+            </div>
+
             <div className="flex flex-wrap gap-1.5">
               {(
                 [
@@ -657,81 +689,20 @@ export function OutfitGamePage({
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            {/* Female Character Stage Card */}
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.98 }}
-              onClick={() => {
-                if (soundEnabled) playPopSound(true);
-                setActiveGender('female');
-              }}
-              className={`relative overflow-hidden rounded-2xl p-3 border text-center transition-all cursor-pointer flex flex-col items-center bg-white/90 backdrop-blur-md ${
-                activeGender === 'female'
-                  ? 'border-pink-400 ring-2 ring-pink-400/50 shadow-lg shadow-pink-500/15'
-                  : 'border-white/60 hover:border-pink-300'
-              }`}
-            >
-              <div
-                className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white via-pink-50/70 to-white/95 backdrop-blur-xl"
-                aria-hidden="true"
-              />
-              <div
-                className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-36 h-36 rounded-full bg-pink-200/45 blur-2xl"
-                aria-hidden="true"
-              />
-              <div className="relative z-10 w-full aspect-[240/360] max-h-[320px] flex items-center justify-center">
-                <OutfitCharacterSvg gender="female" outfit={outfits.female} />
-              </div>
-              <div className="relative z-10 mt-2 pt-2 border-t border-zinc-200/80 w-full">
-                <p className="font-display text-sm font-bold text-zinc-900 truncate">
-                  Wanita
-                </p>
-                <p className="text-[11px] font-medium text-pink-600 truncate">
-                  {activeGender === 'female' ? 'Sedang didandani' : partner1Name}
-                </p>
-              </div>
-            </motion.button>
-
-            {/* Male Character Stage Card */}
-            <motion.button
-              type="button"
-              whileTap={{ scale: 0.98 }}
-              onClick={() => {
-                if (soundEnabled) playPopSound(true);
-                setActiveGender('male');
-              }}
-              className={`relative overflow-hidden rounded-2xl p-3 border text-center transition-all cursor-pointer flex flex-col items-center bg-white/90 backdrop-blur-md ${
-                activeGender === 'male'
-                  ? 'border-pink-400 ring-2 ring-pink-400/50 shadow-lg shadow-pink-500/15'
-                  : 'border-white/60 hover:border-pink-300'
-              }`}
-            >
-              <div
-                className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white via-pink-50/70 to-white/95 backdrop-blur-xl"
-                aria-hidden="true"
-              />
-              <div
-                className="pointer-events-none absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-36 h-36 rounded-full bg-pink-200/45 blur-2xl"
-                aria-hidden="true"
-              />
-              <div className="relative z-10 w-full aspect-[240/360] max-h-[320px] flex items-center justify-center">
-                <OutfitCharacterSvg gender="male" outfit={outfits.male} />
-              </div>
-              <div className="relative z-10 mt-2 pt-2 border-t border-zinc-200/80 w-full">
-                <p className="font-display text-sm font-bold text-zinc-900 truncate">
-                  Lelaki
-                </p>
-                <p className="text-[11px] font-medium text-pink-600 truncate">
-                  {activeGender === 'male' ? 'Sedang didandani' : partner2Name}
-                </p>
-              </div>
-            </motion.button>
-          </div>
+          <OutfitStage3D
+            outfits={outfits}
+            activeGender={activeGender}
+            partner1Name={partner1Name}
+            partner2Name={partner2Name}
+            onSelectGender={(gender) => {
+              if (soundEnabled && activeGender !== gender) playPopSound(true);
+              setActiveGender(gender);
+            }}
+          />
         </section>
 
         {/* Right: Category Drawer */}
-        <section className="lg:col-span-7 rounded-2xl bg-[#14141B] border border-white/10 p-5 sm:p-6 space-y-5">
+        <section className="lg:col-span-6 rounded-2xl bg-[#14141B] border border-white/10 p-5 sm:p-6 space-y-5">
           {/* Character Toggle */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-white/[0.08]">
             <div className="flex items-center gap-2">

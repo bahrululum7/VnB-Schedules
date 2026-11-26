@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react';
-import { X } from 'lucide-react';
+import { MoonStar, X } from 'lucide-react';
 import type {
   ActivityCategory,
   AuthenticatedUser,
@@ -7,10 +7,11 @@ import type {
   EditableDayKey,
   ScheduleOwner,
 } from '../types';
-import { formatShortIndonesianDate } from '../utils/freeTime';
+import { addDaysToDateStr, formatShortIndonesianDate, timeToMinutes } from '../utils/freeTime';
 
 export interface AddScheduleInitial {
   day: EditableDayKey;
+  endDay?: EditableDayKey;
   owner: ScheduleOwner;
   title?: string;
   category?: ActivityCategory;
@@ -28,6 +29,7 @@ interface AddScheduleModalProps {
   onClose: () => void;
   onSave: (payload: {
     date: string;
+    endDate?: string;
     owner: ScheduleOwner;
     title: string;
     category: ActivityCategory;
@@ -61,6 +63,7 @@ export function AddScheduleModal({
   onSave,
 }: AddScheduleModalProps) {
   const [day, setDay] = useState<EditableDayKey>('today');
+  const [crossMidnight, setCrossMidnight] = useState(false);
   const [owner, setOwner] = useState<ScheduleOwner>(currentUser.slot);
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<ActivityCategory>('kuliah');
@@ -73,11 +76,14 @@ export function AddScheduleModal({
   const confirmedRef = useRef(confirmedByDate);
   confirmedRef.current = confirmedByDate;
 
-  const selectedDate = day === 'today' ? todayDate : tomorrowDate;
-  const selectedConf = confirmedByDate[selectedDate];
-  const bothConfirmedForDay = Boolean(
-    selectedConf?.partner1 && selectedConf?.partner2
-  );
+  const startDate = day === 'today' ? todayDate : tomorrowDate;
+  const endDate = crossMidnight ? addDaysToDateStr(startDate, 1) : startDate;
+
+  const startConf = confirmedByDate[startDate];
+  const endConf = confirmedByDate[endDate];
+  const bothConfirmedForSelection = crossMidnight
+    ? Boolean(startConf?.partner1 && startConf?.partner2 && endConf?.partner1 && endConf?.partner2)
+    : Boolean(startConf?.partner1 && startConf?.partner2);
 
   useEffect(() => {
     const justOpened = open && !wasOpenRef.current;
@@ -85,15 +91,22 @@ export function AddScheduleModal({
 
     if (justOpened && initial) {
       const targetDay = initial.day;
-      const targetDate = targetDay === 'today' ? todayDate : tomorrowDate;
-      const conf = confirmedRef.current[targetDate];
-      const canUseTogether = Boolean(conf?.partner1 && conf?.partner2);
+      const isOvernight = Boolean(initial.endDay && initial.endDay !== targetDay);
+      const sDate = targetDay === 'today' ? todayDate : tomorrowDate;
+      const eDate = isOvernight ? addDaysToDateStr(sDate, 1) : sDate;
+      const sConf = confirmedRef.current[sDate];
+      const eConf = confirmedRef.current[eDate];
+      const canUseTogether = isOvernight
+        ? Boolean(sConf?.partner1 && sConf?.partner2 && eConf?.partner1 && eConf?.partner2)
+        : Boolean(sConf?.partner1 && sConf?.partner2);
+
       const safeOwner: ScheduleOwner =
         initial.owner === 'together' && canUseTogether
           ? 'together'
           : currentUser.slot;
 
       setDay(targetDay);
+      setCrossMidnight(isOvernight);
       setOwner(safeOwner);
       setTitle(initial.title ?? '');
       setCategory(
@@ -109,6 +122,14 @@ export function AddScheduleModal({
 
   const presets = owner === 'together' ? TOGETHER_PRESETS : PERSONAL_PRESETS;
 
+  const handleTimeChange = (nextStart: string, nextEnd: string) => {
+    setStartTime(nextStart);
+    setEndTime(nextEnd);
+    if (nextStart && nextEnd && timeToMinutes(nextEnd) <= timeToMinutes(nextStart)) {
+      setCrossMidnight(true);
+    }
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -116,13 +137,27 @@ export function AddScheduleModal({
       setErrorMsg('Tulis dulu nama kegiatannya ya.');
       return;
     }
-    if (!startTime || !endTime || endTime <= startTime) {
-      setErrorMsg('Jam selesai harus lebih malam dari jam mulai.');
+    if (!startTime || !endTime) {
+      setErrorMsg('Isi jam mulai & selesai terlebih dahulu.');
       return;
     }
+    const startMin = timeToMinutes(startTime);
+    const endMin = crossMidnight ? 24 * 60 + timeToMinutes(endTime) : timeToMinutes(endTime);
+    if (endMin <= startMin) {
+      setErrorMsg(
+        'Jam selesai lebih awal dari jam mulai. Aktifkan "Lanjut ke hari berikutnya" jika melewati tengah malam.'
+      );
+      return;
+    }
+    if (endMin - startMin > 24 * 60) {
+      setErrorMsg('Durasi satu jadwal maksimal 24 jam.');
+      return;
+    }
+
     setSaving(true);
     const err = await onSave({
-      date: selectedDate,
+      date: startDate,
+      ...(crossMidnight ? { endDate } : {}),
       owner,
       title: title.trim(),
       category,
@@ -147,7 +182,7 @@ export function AddScheduleModal({
       aria-modal="true"
       aria-labelledby="add-schedule-title"
     >
-      <div className="w-full max-w-md rounded-2xl bg-[#14141B] border border-pink-400/25 p-6 shadow-2xl">
+      <div className="w-full max-w-md rounded-2xl bg-[#14141B] border border-pink-400/25 p-6 shadow-2xl max-h-[92vh] overflow-y-auto">
         <div className="flex items-center justify-between mb-5">
           <h2 id="add-schedule-title" className="font-display text-lg font-bold text-white">
             Tambah Jadwal Baru
@@ -163,9 +198,9 @@ export function AddScheduleModal({
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          {/* Hari */}
+          {/* Hari Mulai */}
           <div className="space-y-1.5">
-            <span className="block text-xs font-medium text-zinc-300">Untuk Hari</span>
+            <span className="block text-xs font-medium text-zinc-300">Mulai di Hari</span>
             <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-[#0E0E13] border border-white/10">
               <button
                 type="button"
@@ -230,13 +265,13 @@ export function AddScheduleModal({
               </button>
               <button
                 type="button"
-                disabled={!bothConfirmedForDay}
+                disabled={!bothConfirmedForSelection}
                 onClick={() => {
                   setOwner('together');
                   setCategory('quality_time');
                 }}
                 className={`min-h-[40px] px-3 rounded-xl border text-xs font-semibold truncate transition-colors ${
-                  !bothConfirmedForDay
+                  !bothConfirmedForSelection
                     ? 'bg-[#0E0E13] border-white/5 text-zinc-600 cursor-not-allowed'
                     : owner === 'together'
                       ? 'bg-pink-500 border-pink-400 text-zinc-950 cursor-pointer'
@@ -246,9 +281,11 @@ export function AddScheduleModal({
                 Quality Time Bareng
               </button>
             </div>
-            {!bothConfirmedForDay && (
+            {!bothConfirmedForSelection && (
               <p className="text-[11px] text-zinc-500">
-                Quality Time terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.
+                {crossMidnight
+                  ? 'Quality Time lintas tengah malam terbuka setelah jadwal Hari Ini & Besok dikonfirmasi berdua.'
+                  : 'Quality Time terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.'}
               </p>
             )}
           </div>
@@ -286,8 +323,8 @@ export function AddScheduleModal({
               maxLength={80}
               placeholder={
                 owner === 'together'
-                  ? 'Misal: Nonton Film Bareng'
-                  : 'Misal: Kuliah Blok Kardio / Belajar'
+                  ? 'Misal: Deep Talk & Nonton Malam'
+                  : 'Misal: Belajar / Nugas Malam'
               }
               className="w-full min-h-[44px] rounded-xl bg-[#0E0E13] border border-white/15 px-3.5 py-2.5 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-pink-400"
             />
@@ -321,7 +358,7 @@ export function AddScheduleModal({
                 id="schedule-start"
                 type="time"
                 value={startTime}
-                onChange={(e) => setStartTime(e.target.value)}
+                onChange={(e) => handleTimeChange(e.target.value, endTime)}
                 className="w-full min-h-[44px] rounded-xl bg-[#0E0E13] border border-white/15 px-3 py-2 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
               />
             </div>
@@ -334,11 +371,42 @@ export function AddScheduleModal({
                 id="schedule-end"
                 type="time"
                 value={endTime}
-                onChange={(e) => setEndTime(e.target.value)}
+                onChange={(e) => handleTimeChange(startTime, e.target.value)}
                 className="w-full min-h-[44px] rounded-xl bg-[#0E0E13] border border-white/15 px-3 py-2 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
               />
             </div>
           </div>
+
+          {/* Overnight / Cross-Midnight Toggle */}
+          <label className="flex items-start gap-3 rounded-xl bg-[#0E0E13] border border-white/10 p-3 cursor-pointer hover:border-pink-400/35 transition-colors">
+            <input
+              type="checkbox"
+              checked={crossMidnight}
+              onChange={(e) => {
+                const next = e.target.checked;
+                setCrossMidnight(next);
+                if (next && owner === 'together') {
+                  const targetEndDate = addDaysToDateStr(startDate, 1);
+                  const ec = confirmedByDate[targetEndDate];
+                  if (!(startConf?.partner1 && startConf?.partner2 && ec?.partner1 && ec?.partner2)) {
+                    setOwner(currentUser.slot);
+                    setCategory('kuliah');
+                  }
+                }
+              }}
+              className="mt-0.5 accent-pink-500 w-4 h-4 shrink-0 cursor-pointer"
+            />
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-pink-200">
+                <MoonStar className="w-3.5 h-3.5 text-pink-400 shrink-0" />
+                <span>Lanjut ke hari berikutnya (lintas tengah malam)</span>
+              </div>
+              <p className="text-[11px] text-zinc-400 mt-0.5 font-mono-tabular">
+                {startTime || '--:--'} ({formatShortIndonesianDate(startDate)}) →{' '}
+                {endTime || '--:--'} ({formatShortIndonesianDate(endDate)})
+              </p>
+            </div>
+          </label>
 
           {errorMsg && (
             <div className="rounded-xl bg-rose-500/15 border border-rose-400/35 px-3.5 py-2.5 text-xs text-rose-200">

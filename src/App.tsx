@@ -6,6 +6,7 @@ import {
   Clock,
   LogOut,
   Plus,
+  Shirt,
   UserCheck,
   Volume2,
   VolumeX,
@@ -15,6 +16,7 @@ import type {
   AuthenticatedUser,
   DayKey,
   EditableDayKey,
+  FreeSlot,
   ScheduleItem,
   ScheduleOwner,
   SharedWorkspaceState,
@@ -22,7 +24,7 @@ import type {
 } from './types';
 import {
   addDaysToDate,
-  computeDetailedFreeSlots,
+  computeWindowDetailedFreeSlots,
   formatDuration,
   formatLocalDateISO,
   formatShortIndonesianDate,
@@ -43,6 +45,9 @@ import {
   ExplosionAlarmModal,
   type ActiveAlarmPayload,
 } from './components/ExplosionAlarmModal';
+import { OutfitGamePage } from './components/OutfitGamePage';
+
+type ActivePage = 'schedule' | 'outfit';
 
 function formatClockHM(date: Date): string {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
@@ -67,7 +72,8 @@ export default function App() {
   const [workspace, setWorkspace] = useState<SharedWorkspaceState | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
 
-  const [selectedDay, setSelectedDay] = useState<DayKey>('today');
+  const [activePage, setActivePage] = useState<ActivePage>('schedule');
+  const [selectedDay, setSelectedDay] = useState<DayKey>('continuous');
   const [modalOpen, setModalOpen] = useState(false);
   const [modalInitial, setModalInitial] = useState<AddScheduleInitial | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -78,7 +84,7 @@ export default function App() {
 
   const firedAlarmsRef = useRef<Set<string>>(new Set());
   const freeTimeSectionRef = useRef<HTMLElement | null>(null);
-  const prevBothConfirmedRef = useRef<boolean>(false);
+  const prevBothConfirmedTodayRef = useRef<boolean>(false);
   const latestRevisionRef = useRef<number>(0);
   const mutationEpochRef = useRef<number>(0);
   const workspaceRef = useRef<SharedWorkspaceState | null>(null);
@@ -97,21 +103,10 @@ export default function App() {
   const yesterdayDate = formatLocalDateISO(addDaysToDate(nowTime, -1));
   const tomorrowDate = formatLocalDateISO(addDaysToDate(nowTime, 1));
 
-  const targetDate =
-    selectedDay === 'yesterday'
-      ? yesterdayDate
-      : selectedDay === 'tomorrow'
-        ? tomorrowDate
-        : todayDate;
-
   const isReadOnly = selectedDay === 'yesterday';
-  const targetDateShort = formatShortIndonesianDate(targetDate);
-  const targetDayDisplay =
-    selectedDay === 'yesterday'
-      ? `Kemarin (${targetDateShort})`
-      : selectedDay === 'today'
-        ? `Hari Ini (${targetDateShort})`
-        : `Besok (${targetDateShort})`;
+  const windowLabel = isReadOnly
+    ? `Kemarin (${formatShortIndonesianDate(yesterdayDate)})`
+    : `Hari Ini (${formatShortIndonesianDate(todayDate)}) → Besok (${formatShortIndonesianDate(tomorrowDate)})`;
 
   const reconcileDeltaWithServer = useCallback(
     async (
@@ -389,28 +384,44 @@ export default function App() {
     }
   }, [nowTime, todayDate, workspace, currentUser, soundEnabled]);
 
-  const dayConf = useMemo(() => {
+  const todayConf = useMemo(() => {
     if (!workspace) return { partner1: false, partner2: false };
     return (
-      workspace.confirmedByDate?.[targetDate] ?? {
+      workspace.confirmedByDate?.[todayDate] ?? {
         partner1: false,
         partner2: false,
       }
     );
-  }, [workspace, targetDate]);
+  }, [workspace, todayDate]);
 
-  const bothConfirmed = Boolean(dayConf.partner1 && dayConf.partner2);
+  const tomorrowConf = useMemo(() => {
+    if (!workspace) return { partner1: false, partner2: false };
+    return (
+      workspace.confirmedByDate?.[tomorrowDate] ?? {
+        partner1: false,
+        partner2: false,
+      }
+    );
+  }, [workspace, tomorrowDate]);
 
-  // Guide users straight to free-time / Quality Time section once both partners confirm
+  const bothConfirmedToday = Boolean(todayConf.partner1 && todayConf.partner2);
+  const bothConfirmedTomorrow = Boolean(tomorrowConf.partner1 && tomorrowConf.partner2);
+  const bothConfirmedAny = bothConfirmedToday || bothConfirmedTomorrow;
+
   useEffect(() => {
-    if (!isReadOnly && bothConfirmed && !prevBothConfirmedRef.current) {
+    if (
+      activePage === 'schedule' &&
+      !isReadOnly &&
+      bothConfirmedToday &&
+      !prevBothConfirmedTodayRef.current
+    ) {
       freeTimeSectionRef.current?.scrollIntoView({
         behavior: 'smooth',
         block: 'center',
       });
     }
-    prevBothConfirmedRef.current = !isReadOnly && bothConfirmed;
-  }, [bothConfirmed, isReadOnly]);
+    prevBothConfirmedTodayRef.current = !isReadOnly && bothConfirmedToday;
+  }, [bothConfirmedToday, isReadOnly, activePage]);
 
   const apiFetch = useCallback(
     async (url: string, init?: RequestInit) => {
@@ -471,11 +482,18 @@ export default function App() {
   const openAddModal = (initial: Partial<AddScheduleInitial>) => {
     if (!currentUser || isReadOnly) return;
     const requestedOwner = initial.owner ?? currentUser.slot;
-    const safeDay: EditableDayKey =
-      initial.day ?? (selectedDay === 'tomorrow' ? 'tomorrow' : 'today');
-    const safeDate = safeDay === 'today' ? todayDate : tomorrowDate;
-    const safeConf = workspace?.confirmedByDate?.[safeDate];
-    const canTogether = Boolean(safeConf?.partner1 && safeConf?.partner2);
+    const safeDay: EditableDayKey = initial.day ?? 'today';
+    const safeEndDay: EditableDayKey | undefined = initial.endDay;
+    const isOvernight = Boolean(safeEndDay && safeEndDay !== safeDay);
+
+    const startD = safeDay === 'today' ? todayDate : tomorrowDate;
+    const endD = isOvernight ? tomorrowDate : startD;
+    const sConf = workspace?.confirmedByDate?.[startD];
+    const eConf = workspace?.confirmedByDate?.[endD];
+    const canTogether = isOvernight
+      ? Boolean(sConf?.partner1 && sConf?.partner2 && eConf?.partner1 && eConf?.partner2)
+      : Boolean(sConf?.partner1 && sConf?.partner2);
+
     const safeOwner: ScheduleOwner =
       requestedOwner === 'together' && canTogether
         ? 'together'
@@ -483,6 +501,7 @@ export default function App() {
 
     setModalInitial({
       day: safeDay,
+      endDay: safeEndDay,
       owner: safeOwner,
       title: initial.title,
       category: initial.category,
@@ -494,6 +513,7 @@ export default function App() {
 
   const handleSaveSchedule = async (payload: {
     date: string;
+    endDate?: string;
     owner: ScheduleOwner;
     title: string;
     category: ActivityCategory;
@@ -563,7 +583,7 @@ export default function App() {
     }
   };
 
-  const handleToggleConfirm = async (nextVal: boolean) => {
+  const handleToggleConfirm = async (dateStr: string, nextVal: boolean) => {
     if (isReadOnly) return;
     setConfirming(true);
     try {
@@ -571,7 +591,7 @@ export default function App() {
       const res = await apiFetch('/api/schedules/confirm', {
         method: 'POST',
         body: JSON.stringify({
-          date: targetDate,
+          date: dateStr,
           clientToday: todayDate,
           confirmed: nextVal,
         }),
@@ -591,7 +611,11 @@ export default function App() {
       mutationEpochRef.current += 1;
       const res = await apiFetch('/api/spinner/options', {
         method: 'POST',
-        body: JSON.stringify({ label, date: targetDate }),
+        body: JSON.stringify({
+          label,
+          date: todayDate,
+          secondaryDate: tomorrowDate,
+        }),
       });
       const data = await res.json();
       if (!res.ok) return data.error || 'Gagal menambah pilihan.';
@@ -607,7 +631,7 @@ export default function App() {
     try {
       mutationEpochRef.current += 1;
       const res = await apiFetch(
-        `/api/spinner/options/${encodeURIComponent(id)}?date=${encodeURIComponent(targetDate)}`,
+        `/api/spinner/options/${encodeURIComponent(id)}?date=${encodeURIComponent(todayDate)}&secondaryDate=${encodeURIComponent(tomorrowDate)}`,
         {
           method: 'DELETE',
         }
@@ -625,7 +649,11 @@ export default function App() {
       mutationEpochRef.current += 1;
       const res = await apiFetch('/api/spinner/spin', {
         method: 'POST',
-        body: JSON.stringify({ date: targetDate, clientToday: todayDate }),
+        body: JSON.stringify({
+          date: todayDate,
+          secondaryDate: tomorrowDate,
+          clientToday: todayDate,
+        }),
       });
       const data = await res.json();
       if (res.ok && data.state) {
@@ -640,12 +668,15 @@ export default function App() {
 
   const handleInsertSpinWinner = async (
     winnerLabel: string,
+    startDate: string,
+    endDate: string,
     startTime: string,
     endTime: string
   ): Promise<string | null> => {
     if (isReadOnly) return 'Riwayat kemarin tidak bisa diubah.';
     return handleSaveSchedule({
-      date: targetDate,
+      date: startDate,
+      ...(endDate !== startDate ? { endDate } : {}),
       owner: 'together',
       title: winnerLabel,
       category: 'quality_time',
@@ -678,15 +709,35 @@ export default function App() {
 
   const detailedFreeSlots = useMemo(() => {
     if (!workspace) return [];
-    return computeDetailedFreeSlots(workspace.schedules, targetDate);
-  }, [workspace, targetDate]);
+    return computeWindowDetailedFreeSlots(
+      workspace.schedules,
+      isReadOnly ? yesterdayDate : todayDate,
+      isReadOnly ? 1 : 2
+    );
+  }, [workspace, isReadOnly, yesterdayDate, todayDate]);
 
   const mutualFreeSlots = useMemo(
     () => detailedFreeSlots.filter((s) => s.freeFor === 'both'),
     [detailedFreeSlots]
   );
 
-  // Find next upcoming today schedule for live-clock alarm indicator
+  const isSlotConfirmedForQualityTime = useCallback(
+    (slot: FreeSlot): boolean => {
+      if (!workspace) return false;
+      const startOk = Boolean(
+        workspace.confirmedByDate?.[slot.startDate]?.partner1 &&
+          workspace.confirmedByDate?.[slot.startDate]?.partner2
+      );
+      if (slot.endDate === slot.startDate) return startOk;
+      const endOk = Boolean(
+        workspace.confirmedByDate?.[slot.endDate]?.partner1 &&
+          workspace.confirmedByDate?.[slot.endDate]?.partner2
+      );
+      return startOk && endOk;
+    },
+    [workspace]
+  );
+
   const nextTodayAlarm = useMemo(() => {
     if (!workspace) return null;
     const nowMin = nowTime.getHours() * 60 + nowTime.getMinutes();
@@ -695,6 +746,13 @@ export default function App() {
       .sort((a, b) => timeToMinutes(a.startTime) - timeToMinutes(b.startTime));
     return upcoming[0] ?? null;
   }, [workspace, todayDate, nowTime]);
+
+  const navigateScheduleSection = (hashId: string) => {
+    setActivePage('schedule');
+    window.setTimeout(() => {
+      document.getElementById(hashId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }, 60);
+  };
 
   if (checkingSession) {
     return (
@@ -712,46 +770,69 @@ export default function App() {
   }
 
   const { partner1, partner2 } = workspace.partners;
-  const ownConfirmed = dayConf[currentUser.slot];
 
   return (
     <div className="min-h-screen bg-[#0B0B0F] text-[#FAF5F7]">
       {/* Strict 3-zone Top Navigation Bar */}
       <header className="sticky top-0 z-30 bg-[#0B0B0F]/90 backdrop-blur-md border-b border-white/10">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-8">
-          <a
-            href="#top"
-            className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0"
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-6">
+          <button
+            type="button"
+            onClick={() => navigateScheduleSection('top')}
+            className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0 cursor-pointer"
           >
             VnB Schedules
-          </a>
+          </button>
 
           <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-zinc-400">
-            <a
-              href="#jadwal"
-              className="hover:text-pink-300 transition-colors whitespace-nowrap shrink-0"
+            <button
+              type="button"
+              onClick={() => navigateScheduleSection('jadwal')}
+              className={`hover:text-pink-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                activePage === 'schedule' ? 'text-white' : ''
+              }`}
             >
               Jadwal Berdua
-            </a>
-            <a
-              href="#jam-kosong"
-              className="hover:text-pink-300 transition-colors whitespace-nowrap shrink-0"
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateScheduleSection('jam-kosong')}
+              className="hover:text-pink-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Jam Kosong
-            </a>
-            <a
-              href="#spin-kegiatan"
-              className="hover:text-pink-300 transition-colors whitespace-nowrap shrink-0"
+            </button>
+            <button
+              type="button"
+              onClick={() => navigateScheduleSection('spin-kegiatan')}
+              className="hover:text-pink-300 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               Spin Kegiatan
-            </a>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActivePage('outfit')}
+              className={`hover:text-pink-300 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer ${
+                activePage === 'outfit' ? 'text-pink-300 font-semibold' : ''
+              }`}
+            >
+              <Shirt className="w-3.5 h-3.5" />
+              <span>Outfit Game</span>
+            </button>
           </nav>
 
           <div className="shrink-0">
-            {isReadOnly ? (
+            {activePage === 'outfit' ? (
               <button
                 type="button"
-                onClick={() => setSelectedDay('today')}
+                onClick={() => setActivePage('schedule')}
+                className="min-h-[40px] px-4 py-2 rounded-xl border border-pink-400/35 bg-pink-500/10 hover:bg-pink-500/20 text-pink-200 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <span>Kembali ke Jadwal</span>
+              </button>
+            ) : isReadOnly ? (
+              <button
+                type="button"
+                onClick={() => setSelectedDay('continuous')}
                 className="min-h-[40px] px-4 py-2 rounded-xl border border-pink-400/35 bg-pink-500/10 hover:bg-pink-500/20 text-pink-200 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
                 <span>Kembali ke Hari Ini</span>
@@ -762,7 +843,7 @@ export default function App() {
                 onClick={() =>
                   openAddModal({
                     owner: currentUser.slot,
-                    day: selectedDay === 'tomorrow' ? 'tomorrow' : 'today',
+                    day: 'today',
                   })
                 }
                 className="min-h-[40px] px-4 py-2 rounded-xl bg-pink-500 hover:bg-pink-400 text-zinc-950 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
@@ -776,327 +857,383 @@ export default function App() {
       </header>
 
       <main id="top" className="max-w-7xl mx-auto px-4 sm:px-6 py-7 space-y-8">
-        {/* Hero, Live Clock & Couple Illustration */}
-        <section className="rounded-2xl bg-[#14141B] border border-white/10 p-6 sm:p-7 grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
-          <div className="lg:col-span-6 space-y-5">
-            <div className="space-y-2">
-              <p className="text-xs font-medium text-pink-300">
-                Masuk sebagai {currentUser.name} · {formatIndonesianDate(nowTime)}
-              </p>
-              <h1 className="font-display text-2xl sm:text-3xl font-bold text-white text-balance">
-                Jadwal {partner1.name} & {partner2.name}
-              </h1>
-              <p className="text-sm text-zinc-400 leading-relaxed max-w-lg">
-                Isi jadwal masing-masing dulu lalu konfirmasi selesai, setelah itu pilih jam kosong buat quality time berdua.
-              </p>
-            </div>
+        {/* Compact Mobile Page Switcher */}
+        <div className="flex md:hidden items-center justify-between gap-2 p-1 rounded-xl bg-[#14141B] border border-white/10">
+          <button
+            type="button"
+            onClick={() => setActivePage('schedule')}
+            className={`flex-1 min-h-[38px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+              activePage === 'schedule'
+                ? 'bg-pink-500 text-zinc-950'
+                : 'text-zinc-300'
+            }`}
+          >
+            Jadwal Berdua
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePage('outfit')}
+            className={`flex-1 min-h-[38px] rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
+              activePage === 'outfit'
+                ? 'bg-pink-500 text-zinc-950'
+                : 'text-zinc-300'
+            }`}
+          >
+            <Shirt className="w-3.5 h-3.5" />
+            <span>Outfit Game</span>
+          </button>
+        </div>
 
-            {/* Live Digital Clock + Auto-Alarm Status */}
-            <div className="rounded-xl bg-[#0E0E13] border border-pink-400/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p className="text-[11px] text-zinc-400">Jam Sekarang (Auto-Alarm)</p>
-                <p className="font-mono-tabular text-2xl sm:text-3xl font-bold text-white tracking-tight">
-                  {formatClockHMS(nowTime)}
-                </p>
-              </div>
-              <div className="text-left sm:text-right">
-                <p className="text-[11px] text-pink-300 font-medium">
-                  {nextTodayAlarm
-                    ? `Alarm berikutnya · ${nextTodayAlarm.startTime}`
-                    : 'Belum ada alarm jadwal hari ini'}
-                </p>
-                <p className="text-xs text-zinc-400 truncate max-w-[210px]">
-                  {nextTodayAlarm
-                    ? nextTodayAlarm.title
-                    : 'Otomatis nyala saat jam sesuai jadwal'}
-                </p>
-              </div>
-            </div>
-
-            {/* Workspace Toolbar */}
-            <div className="flex flex-wrap items-center gap-2.5">
-              {/* 3-Day Segmented Switcher: Kemarin (Riwayat) | Hari Ini | Besok */}
-              <div className="inline-flex p-1 rounded-xl bg-[#0B0B0F] border border-white/10">
-                <button
-                  type="button"
-                  onClick={() => setSelectedDay('yesterday')}
-                  className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                    selectedDay === 'yesterday'
-                      ? 'bg-pink-500 text-zinc-950'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Kemarin ({formatShortIndonesianDate(yesterdayDate)})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedDay('today')}
-                  className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                    selectedDay === 'today'
-                      ? 'bg-pink-500 text-zinc-950'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Hari Ini ({formatShortIndonesianDate(todayDate)})
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedDay('tomorrow')}
-                  className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
-                    selectedDay === 'tomorrow'
-                      ? 'bg-pink-500 text-zinc-950'
-                      : 'text-zinc-400 hover:text-white'
-                  }`}
-                >
-                  Besok ({formatShortIndonesianDate(tomorrowDate)})
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={handleTestAlarm}
-                className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#1D1D27] hover:bg-pink-500/15 border border-white/10 hover:border-pink-400/40 text-xs font-medium text-pink-200 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <BellRing className="w-3.5 h-3.5 text-pink-400" />
-                <span>Tes Efek Alarm</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setSoundEnabled((v) => !v)}
-                aria-label={soundEnabled ? 'Matikan suara alarm' : 'Nyalakan suara alarm'}
-                className="min-h-[44px] px-3 py-2 rounded-xl bg-[#1D1D27] border border-white/10 text-xs font-medium text-zinc-300 hover:text-white inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-              >
-                {soundEnabled ? (
-                  <Volume2 className="w-3.5 h-3.5 text-pink-300" />
-                ) : (
-                  <VolumeX className="w-3.5 h-3.5 text-zinc-500" />
-                )}
-                <span>{soundEnabled ? 'Suara Nyala' : 'Bisu'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="min-h-[44px] px-3 py-2 rounded-xl border border-white/10 text-xs font-medium text-zinc-400 hover:text-white hover:bg-white/5 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
-              >
-                <LogOut className="w-3.5 h-3.5" />
-                <span>Ganti Akun</span>
-              </button>
-            </div>
-          </div>
-
-          <div className="lg:col-span-6">
-            <CoupleIllustration
-              partner1Name={partner1.name}
-              partner2Name={partner2.name}
-              compact
-            />
-          </div>
-        </section>
-
-        {/* Unified 1-View Dual Partner + Shared Schedule Columns */}
-        <section id="jadwal" className="space-y-4">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div>
-              <h2 className="font-display text-xl font-bold text-white">
-                Langkah 1 · {isReadOnly ? 'Riwayat Jadwal' : 'Isi & Konfirmasi Jadwal Pribadi'} · {targetDayDisplay}
-              </h2>
-              <p className="text-xs text-zinc-400 mt-0.5">
-                {isReadOnly
-                  ? 'Mode lihat riwayat kemarin. Jadwal otomatis berpindah setiap pergantian hari pukul 00:00.'
-                  : bothConfirmed
-                    ? 'Kalian berdua sudah konfirmasi! Sekarang lanjut isi Quality Time di jam kosong.'
-                    : ownConfirmed
-                      ? 'Kamu sudah konfirmasi selesai. Menunggu pasanganmu konfirmasi jadwalnya.'
-                      : `Isi jadwal ${currentUser.name} terlebih dahulu, lalu tekan "Konfirmasi Selesai Isi Jadwal".`}
-              </p>
-            </div>
-            <p className="text-xs text-zinc-500">
-              {isReadOnly ? 'Arsip hanya lihat' : 'Sinkronisasi langsung aktif'}
-            </p>
-          </div>
-
-          <ScheduleTable24h
-            selectedDay={selectedDay}
-            targetDate={targetDate}
-            dateLabel={targetDateShort}
-            isReadOnly={isReadOnly}
-            currentHour={nowTime.getHours()}
-            currentUser={currentUser}
-            partner1={partner1}
-            partner2={partner2}
-            schedules={workspace.schedules}
-            dayConf={dayConf}
-            bothConfirmed={bothConfirmed}
-            confirming={confirming}
-            onAddAtHour={(owner, startTime, endTime) =>
-              openAddModal({
-                owner,
-                day: selectedDay === 'tomorrow' ? 'tomorrow' : 'today',
-                startTime,
-                endTime,
-                category: owner === 'together' ? 'quality_time' : 'kuliah',
-              })
-            }
-            onDeleteItem={handleDeleteSchedule}
-            onToggleConfirm={handleToggleConfirm}
-            onPreviewAlarm={(item) =>
-              setActiveAlarm({
-                item,
-                partner1Name: partner1.name,
-                partner2Name: partner2.name,
-                soundEnabled,
-              })
-            }
+        {activePage === 'outfit' ? (
+          <OutfitGamePage
+            partner1Name={partner1.name}
+            partner2Name={partner2.name}
+            soundEnabled={soundEnabled}
           />
-        </section>
+        ) : (
+          <>
+            {/* Hero, Live Clock & Couple Illustration */}
+            <section className="rounded-2xl bg-[#14141B] border border-white/10 p-6 sm:p-7 grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+              <div className="lg:col-span-6 space-y-5">
+                <div className="space-y-2">
+                  <p className="text-xs font-medium text-pink-300">
+                    Masuk sebagai {currentUser.name} · {formatIndonesianDate(nowTime)}
+                  </p>
+                  <h1 className="font-display text-2xl sm:text-3xl font-bold text-white text-balance">
+                    Jadwal {partner1.name} & {partner2.name}
+                  </h1>
+                  <p className="text-sm text-zinc-400 leading-relaxed max-w-lg">
+                    Jadwal Hari Ini & Besok tersambung 48 jam nonstop biar agenda malam sampai dini hari gampang diatur berdua.
+                  </p>
+                </div>
 
-        {/* Step 2: Labeled Free Time Recommendations */}
-        <section
-          ref={freeTimeSectionRef}
-          id="jam-kosong"
-          className={`rounded-2xl border p-5 sm:p-6 space-y-4 transition-colors ${
-            !isReadOnly && bothConfirmed
-              ? 'bg-[#17121A] border-pink-400/50'
-              : 'bg-[#14141B] border-white/10'
-          }`}
-        >
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5">
-              {bothConfirmed && !isReadOnly ? (
-                <CheckCircle2 className="w-4 h-4 text-pink-400 shrink-0" />
-              ) : (
-                <Clock className="w-4 h-4 text-pink-400 shrink-0" />
-              )}
-              <h2 className="font-display text-base sm:text-lg font-bold text-white">
-                Langkah 2 · Rekomendasi Jam Kosong · {targetDayDisplay}
-              </h2>
-            </div>
-            <p className="text-xs text-zinc-400">
-              {isReadOnly
-                ? 'Menampilkan catatan jam kosong di hari kemarin (hanya lihat).'
-                : bothConfirmed
-                  ? 'Sudah siap! Jam kosong berdua bisa langsung diisi Quality Time.'
-                  : `Menunggu konfirmasi selesai dari ${!dayConf.partner1 && !dayConf.partner2 ? `${partner1.name} & ${partner2.name}` : !dayConf.partner1 ? partner1.name : partner2.name}`}
-            </p>
-          </div>
-
-          {detailedFreeSlots.length === 0 ? (
-            <p className="text-sm text-zinc-400 py-2">
-              Tidak ada jeda kosong minimal 30 menit di {targetDayDisplay}.
-            </p>
-          ) : (
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-              {detailedFreeSlots.map((slot) => {
-                const isBoth = slot.freeFor === 'both';
-                const freeOwnerLabel =
-                  slot.freeFor === 'both'
-                    ? `Kosong berdua · ${partner1.name} & ${partner2.name}`
-                    : slot.freeFor === 'partner1'
-                      ? `Kosong milik ${partner1.name} saja`
-                      : `Kosong milik ${partner2.name} saja`;
-                const ownerSubNote =
-                  slot.freeFor === 'both'
-                    ? `Kosong ${formatDuration(slot.durationMinutes)}`
-                    : slot.freeFor === 'partner1'
-                      ? `${formatDuration(slot.durationMinutes)} · ${partner2.name} lagi ada kegiatan`
-                      : `${formatDuration(slot.durationMinutes)} · ${partner1.name} lagi ada kegiatan`;
-                const isCurrentUserSoloFree =
-                  slot.freeFor === currentUser.slot;
-
-                return (
-                  <div
-                    key={`${slot.startTime}-${slot.endTime}-${slot.freeFor}`}
-                    className={`rounded-xl border p-3.5 flex flex-col justify-between gap-3 ${
-                      isBoth
-                        ? 'bg-[#15111A] border-pink-400/35'
-                        : 'bg-[#0E0E13] border-white/10'
-                    }`}
-                  >
-                    <div className="space-y-1">
-                      <p
-                        className={`text-[11px] font-semibold leading-snug ${
-                          isBoth ? 'text-pink-300' : 'text-zinc-300'
-                        }`}
-                      >
-                        {freeOwnerLabel}
-                      </p>
-                      <p className="font-mono-tabular text-sm font-semibold text-white">
-                        {slot.startTime} – {slot.endTime}
-                      </p>
-                      <p className="text-xs text-zinc-400">{ownerSubNote}</p>
-                    </div>
-
-                    {isReadOnly ? (
-                      <div className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#16161F] border border-white/5 text-xs text-zinc-500 flex items-center justify-center">
-                        Riwayat · Hanya Lihat
-                      </div>
-                    ) : isBoth ? (
-                      <button
-                        type="button"
-                        disabled={!bothConfirmed}
-                        onClick={() =>
-                          openAddModal({
-                            day: selectedDay === 'tomorrow' ? 'tomorrow' : 'today',
-                            owner: 'together',
-                            category: 'quality_time',
-                            startTime: slot.startTime,
-                            endTime: slot.endTime,
-                          })
-                        }
-                        className={`min-h-[38px] w-full px-3 py-1.5 rounded-lg border text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
-                          bothConfirmed
-                            ? 'bg-pink-500 hover:bg-pink-400 border-pink-400 text-zinc-950 cursor-pointer'
-                            : 'bg-[#181822] border-white/10 text-zinc-500 cursor-not-allowed'
-                        }`}
-                      >
-                        <CalendarHeart className="w-3.5 h-3.5" />
-                        <span>{bothConfirmed ? 'Isi Quality Time' : 'Konfirmasi Dulu'}</span>
-                      </button>
-                    ) : isCurrentUserSoloFree ? (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          openAddModal({
-                            day: selectedDay === 'tomorrow' ? 'tomorrow' : 'today',
-                            owner: currentUser.slot,
-                            category: 'kuliah',
-                            startTime: slot.startTime,
-                            endTime: slot.endTime,
-                          })
-                        }
-                        className="min-h-[38px] w-full px-3 py-1.5 rounded-lg border border-white/15 bg-[#181822] hover:border-pink-400/40 hover:text-pink-200 text-zinc-200 text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
-                      >
-                        <UserCheck className="w-3.5 h-3.5 text-pink-300" />
-                        <span>Isi Jadwal {currentUser.name}</span>
-                      </button>
-                    ) : (
-                      <div className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#14141B] border border-white/10 text-xs text-zinc-500 flex items-center justify-center text-center">
-                        Bukan jam kosongmu
-                      </div>
-                    )}
+                {/* Live Digital Clock + Auto-Alarm Status */}
+                <div className="rounded-xl bg-[#0E0E13] border border-pink-400/20 px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-[11px] text-zinc-400">Jam Sekarang (Auto-Alarm)</p>
+                    <p className="font-mono-tabular text-2xl sm:text-3xl font-bold text-white tracking-tight">
+                      {formatClockHMS(nowTime)}
+                    </p>
                   </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
+                  <div className="text-left sm:text-right">
+                    <p className="text-[11px] text-pink-300 font-medium">
+                      {nextTodayAlarm
+                        ? `Alarm berikutnya · ${nextTodayAlarm.startTime}`
+                        : 'Belum ada alarm jadwal hari ini'}
+                    </p>
+                    <p className="text-xs text-zinc-400 truncate max-w-[210px]">
+                      {nextTodayAlarm
+                        ? nextTodayAlarm.title
+                        : 'Otomatis nyala saat jam sesuai jadwal'}
+                    </p>
+                  </div>
+                </div>
 
-        {/* Spinner Section */}
-        <ActivitySpinner
-          options={workspace.spinnerOptions}
-          lastSpin={workspace.lastSpin}
-          selectedDay={selectedDay}
-          dateLabel={targetDateShort}
-          isReadOnly={isReadOnly}
-          freeSlots={mutualFreeSlots}
-          canBookQualityTime={!isReadOnly && bothConfirmed}
-          onAddOption={handleAddSpinOption}
-          onDeleteOption={handleDeleteSpinOption}
-          onTriggerSpin={handleTriggerSpin}
-          onInsertWinnerToSlot={handleInsertSpinWinner}
-        />
+                {/* Workspace Toolbar */}
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <div className="inline-flex p-1 rounded-xl bg-[#0B0B0F] border border-white/10">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDay('yesterday')}
+                      className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                        selectedDay === 'yesterday'
+                          ? 'bg-pink-500 text-zinc-950'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Kemarin ({formatShortIndonesianDate(yesterdayDate)})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedDay('continuous')}
+                      className={`min-h-[36px] px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                        selectedDay === 'continuous'
+                          ? 'bg-pink-500 text-zinc-950'
+                          : 'text-zinc-400 hover:text-white'
+                      }`}
+                    >
+                      Hari Ini → Besok ({formatShortIndonesianDate(todayDate)}–{formatShortIndonesianDate(tomorrowDate)})
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleTestAlarm}
+                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-[#1D1D27] hover:bg-pink-500/15 border border-white/10 hover:border-pink-400/40 text-xs font-medium text-pink-200 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <BellRing className="w-3.5 h-3.5 text-pink-400" />
+                    <span>Tes Efek Alarm</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setSoundEnabled((v) => !v)}
+                    aria-label={soundEnabled ? 'Matikan suara alarm' : 'Nyalakan suara alarm'}
+                    className="min-h-[44px] px-3 py-2 rounded-xl bg-[#1D1D27] border border-white/10 text-xs font-medium text-zinc-300 hover:text-white inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {soundEnabled ? (
+                      <Volume2 className="w-3.5 h-3.5 text-pink-300" />
+                    ) : (
+                      <VolumeX className="w-3.5 h-3.5 text-zinc-500" />
+                    )}
+                    <span>{soundEnabled ? 'Suara Nyala' : 'Bisu'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="min-h-[44px] px-3 py-2 rounded-xl border border-white/10 text-xs font-medium text-zinc-400 hover:text-white hover:bg-white/5 inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>Ganti Akun</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="lg:col-span-6">
+                <CoupleIllustration
+                  partner1Name={partner1.name}
+                  partner2Name={partner2.name}
+                  compact
+                />
+              </div>
+            </section>
+
+            {/* Step 1: Continuous 48h Schedule Table */}
+            <section id="jadwal" className="space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h2 className="font-display text-xl font-bold text-white">
+                    Langkah 1 · {isReadOnly ? 'Riwayat Jadwal' : 'Tabel Berkesinambungan'} · {windowLabel}
+                  </h2>
+                  <p className="text-xs text-zinc-400 mt-0.5">
+                    {isReadOnly
+                      ? 'Mode lihat riwayat kemarin. Jadwal otomatis bergulir setiap pergantian hari pukul 00:00.'
+                      : 'Isi jadwal pribadi Hari Ini maupun Besok (termasuk kegiatan jam 22:00 sampai 03:00 dini hari), lalu konfirmasi selesai.'}
+                  </p>
+                </div>
+                <p className="text-xs text-zinc-500">
+                  {isReadOnly ? 'Arsip hanya lihat' : 'Sinkronisasi langsung aktif'}
+                </p>
+              </div>
+
+              <ScheduleTable24h
+                selectedDay={selectedDay}
+                yesterdayDate={yesterdayDate}
+                todayDate={todayDate}
+                tomorrowDate={tomorrowDate}
+                currentHour={nowTime.getHours()}
+                currentUser={currentUser}
+                partner1={partner1}
+                partner2={partner2}
+                schedules={workspace.schedules}
+                confirmedByDate={workspace.confirmedByDate ?? {}}
+                confirming={confirming}
+                onAddAtHour={(day, owner, startTime, endTime) =>
+                  openAddModal({
+                    day,
+                    owner,
+                    startTime,
+                    endTime,
+                    category: owner === 'together' ? 'quality_time' : 'kuliah',
+                  })
+                }
+                onDeleteItem={handleDeleteSchedule}
+                onToggleConfirm={handleToggleConfirm}
+                onPreviewAlarm={(item) =>
+                  setActiveAlarm({
+                    item,
+                    partner1Name: partner1.name,
+                    partner2Name: partner2.name,
+                    soundEnabled,
+                  })
+                }
+              />
+            </section>
+
+            {/* Step 2: Continuous Labeled Free Time Recommendations */}
+            <section
+              ref={freeTimeSectionRef}
+              id="jam-kosong"
+              className={`rounded-2xl border p-5 sm:p-6 space-y-4 transition-colors ${
+                !isReadOnly && bothConfirmedAny
+                  ? 'bg-[#17121A] border-pink-400/50'
+                  : 'bg-[#14141B] border-white/10'
+              }`}
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  {bothConfirmedAny && !isReadOnly ? (
+                    <CheckCircle2 className="w-4 h-4 text-pink-400 shrink-0" />
+                  ) : (
+                    <Clock className="w-4 h-4 text-pink-400 shrink-0" />
+                  )}
+                  <h2 className="font-display text-base sm:text-lg font-bold text-white">
+                    Langkah 2 · Rekomendasi Jam Kosong · {windowLabel}
+                  </h2>
+                </div>
+                <p className="text-xs text-zinc-400">
+                  {isReadOnly
+                    ? 'Menampilkan catatan jam kosong di hari kemarin (hanya lihat).'
+                    : bothConfirmedToday && bothConfirmedTomorrow
+                      ? 'Hari Ini & Besok sudah siap! Slot lintas malam juga langsung bisa diisi.'
+                      : bothConfirmedAny
+                        ? 'Sebagian hari sudah dikonfirmasi berdua. Konfirmasi kedua hari untuk slot lintas malam.'
+                        : 'Konfirmasi selesai isi jadwal pribadi untuk membuka tombol Quality Time.'}
+                </p>
+              </div>
+
+              {detailedFreeSlots.length === 0 ? (
+                <p className="text-sm text-zinc-400 py-2">
+                  Tidak ada jeda kosong minimal 30 menit di {windowLabel}.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                  {detailedFreeSlots.map((slot) => {
+                    const isBoth = slot.freeFor === 'both';
+                    const isOvernight = slot.startDate !== slot.endDate;
+                    const slotStartDayLabel =
+                      slot.startDate === todayDate
+                        ? 'Hari Ini'
+                        : slot.startDate === tomorrowDate
+                          ? 'Besok'
+                          : formatShortIndonesianDate(slot.startDate);
+                    const slotEndDayLabel =
+                      slot.endDate === todayDate
+                        ? 'Hari Ini'
+                        : slot.endDate === tomorrowDate
+                          ? 'Besok'
+                          : formatShortIndonesianDate(slot.endDate);
+
+                    const freeOwnerLabel =
+                      slot.freeFor === 'both'
+                        ? `Kosong berdua · ${partner1.name} & ${partner2.name}`
+                        : slot.freeFor === 'partner1'
+                          ? `Kosong milik ${partner1.name} saja`
+                          : `Kosong milik ${partner2.name} saja`;
+                    const ownerSubNote =
+                      slot.freeFor === 'both'
+                        ? `Kosong ${formatDuration(slot.durationMinutes)}`
+                        : slot.freeFor === 'partner1'
+                          ? `${formatDuration(slot.durationMinutes)} · ${partner2.name} ada kegiatan`
+                          : `${formatDuration(slot.durationMinutes)} · ${partner1.name} ada kegiatan`;
+
+                    const canBookSlotQt = isBoth && isSlotConfirmedForQualityTime(slot);
+                    const isCurrentUserSoloFree = slot.freeFor === currentUser.slot;
+
+                    const slotStartEditableDay: EditableDayKey =
+                      slot.startDate === tomorrowDate ? 'tomorrow' : 'today';
+                    const slotEndEditableDay: EditableDayKey =
+                      slot.endDate === tomorrowDate ? 'tomorrow' : 'today';
+
+                    return (
+                      <div
+                        key={`${slot.startDate}-${slot.startTime}-${slot.endDate}-${slot.endTime}-${slot.freeFor}`}
+                        className={`rounded-xl border p-3.5 flex flex-col justify-between gap-3 ${
+                          isBoth
+                            ? 'bg-[#15111A] border-pink-400/35'
+                            : 'bg-[#0E0E13] border-white/10'
+                        }`}
+                      >
+                        <div className="space-y-1">
+                          <p
+                            className={`text-[11px] font-semibold leading-snug ${
+                              isBoth ? 'text-pink-300' : 'text-zinc-300'
+                            }`}
+                          >
+                            {freeOwnerLabel}
+                          </p>
+                          <p className="font-mono-tabular text-sm font-semibold text-white">
+                            {isOvernight
+                              ? `${slot.startTime} (${slotStartDayLabel}) – ${slot.endTime} (${slotEndDayLabel})`
+                              : `${slot.startTime} – ${slot.endTime}`}
+                          </p>
+                          <p className="text-[11px] text-zinc-500">
+                            {isOvernight
+                              ? `Lintas tengah malam · ${formatShortIndonesianDate(slot.startDate)}–${formatShortIndonesianDate(slot.endDate)}`
+                              : `${slotStartDayLabel} (${formatShortIndonesianDate(slot.startDate)})`}
+                          </p>
+                          <p className="text-xs text-zinc-400">{ownerSubNote}</p>
+                        </div>
+
+                        {isReadOnly ? (
+                          <div className="min-h-[36px] px-3 py-1.5 rounded-lg bg-[#16161F] border border-white/5 text-xs text-zinc-500 flex items-center justify-center">
+                            Riwayat · Hanya Lihat
+                          </div>
+                        ) : isBoth ? (
+                          <button
+                            type="button"
+                            disabled={!canBookSlotQt}
+                            onClick={() =>
+                              openAddModal({
+                                day: slotStartEditableDay,
+                                endDay: slotEndEditableDay,
+                                owner: 'together',
+                                category: 'quality_time',
+                                startTime: slot.startTime,
+                                endTime: slot.endTime,
+                              })
+                            }
+                            className={`min-h-[38px] w-full px-3 py-1.5 rounded-lg border text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors ${
+                              canBookSlotQt
+                                ? 'bg-pink-500 hover:bg-pink-400 border-pink-400 text-zinc-950 cursor-pointer'
+                                : 'bg-[#181822] border-white/10 text-zinc-500 cursor-not-allowed'
+                            }`}
+                          >
+                            <CalendarHeart className="w-3.5 h-3.5" />
+                            <span>
+                              {canBookSlotQt ? 'Isi Quality Time' : 'Konfirmasi Dulu'}
+                            </span>
+                          </button>
+                        ) : isCurrentUserSoloFree ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              openAddModal({
+                                day: slotStartEditableDay,
+                                endDay: slotEndEditableDay,
+                                owner: currentUser.slot,
+                                category: 'kuliah',
+                                startTime: slot.startTime,
+                                endTime: slot.endTime,
+                              })
+                            }
+                            className="min-h-[38px] w-full px-3 py-1.5 rounded-lg border border-white/15 bg-[#181822] hover:border-pink-400/40 hover:text-pink-200 text-zinc-200 text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                          >
+                            <UserCheck className="w-3.5 h-3.5 text-pink-300" />
+                            <span>Isi Jadwal {currentUser.name}</span>
+                          </button>
+                        ) : (
+                          <div className="min-h-[38px] px-3 py-1.5 rounded-lg bg-[#14141B] border border-white/10 text-xs text-zinc-500 flex items-center justify-center text-center">
+                            Bukan jam kosongmu
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
+            {/* Spinner Section */}
+            <ActivitySpinner
+              options={workspace.spinnerOptions}
+              lastSpin={workspace.lastSpin}
+              selectedDay={selectedDay}
+              yesterdayDate={yesterdayDate}
+              todayDate={todayDate}
+              tomorrowDate={tomorrowDate}
+              confirmedByDate={workspace.confirmedByDate ?? {}}
+              isReadOnly={isReadOnly}
+              freeSlots={mutualFreeSlots}
+              canBookQualityTime={!isReadOnly && bothConfirmedAny}
+              onAddOption={handleAddSpinOption}
+              onDeleteOption={handleDeleteSpinOption}
+              onTriggerSpin={handleTriggerSpin}
+              onInsertWinnerToSlot={handleInsertSpinWinner}
+            />
+          </>
+        )}
       </main>
 
       <footer className="max-w-7xl mx-auto px-4 sm:px-6 py-8 border-t border-white/[0.06] text-xs text-zinc-500 flex flex-col sm:flex-row items-center justify-between gap-2">

@@ -13,6 +13,13 @@ export function addDaysToDate(date: Date, deltaDays: number): Date {
   return next;
 }
 
+export function addDaysToDateStr(dateStr: string, deltaDays: number): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return dateStr;
+  const dt = new Date(y, m - 1, d + deltaDays);
+  return formatLocalDateISO(dt);
+}
+
 export function formatShortIndonesianDate(dateStr: string): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   if (!y || !m || !d) return dateStr;
@@ -46,99 +53,84 @@ export function formatDuration(minutes: number): string {
   return `${m} menit`;
 }
 
-/**
- * Computes mutually free intervals across the full 00:00 - 23:59 day
- * between Partner 1, Partner 2, and already-scheduled Quality Time blocks.
- */
-export function computeMutualFreeSlots(
-  schedules: ScheduleItem[],
-  targetDate: string,
-  options?: { windowStart?: string; windowEnd?: string; minDurationMinutes?: number }
-): FreeSlot[] {
-  const windowStartMin = timeToMinutes(options?.windowStart ?? '00:00');
-  const windowEndMin = timeToMinutes(options?.windowEnd ?? '23:59');
-  const minDuration = options?.minDurationMinutes ?? 30;
-
-  const daySchedules = schedules.filter((s) => s.date === targetDate);
-
-  const busyIntervals = daySchedules
-    .map((s) => ({
-      start: Math.max(windowStartMin, timeToMinutes(s.startTime)),
-      end: Math.min(windowEndMin, timeToMinutes(s.endTime)),
-    }))
-    .filter((iv) => iv.end > iv.start)
-    .sort((a, b) => a.start - b.start);
-
-  const merged: Array<{ start: number; end: number }> = [];
-  for (const iv of busyIntervals) {
-    if (merged.length === 0) {
-      merged.push({ ...iv });
-    } else {
-      const prev = merged[merged.length - 1];
-      if (iv.start <= prev.end) {
-        prev.end = Math.max(prev.end, iv.end);
-      } else {
-        merged.push({ ...iv });
-      }
-    }
-  }
-
-  const freeSlots: FreeSlot[] = [];
-  let cursor = windowStartMin;
-
-  for (const busy of merged) {
-    if (busy.start - cursor >= minDuration) {
-      freeSlots.push({
-        startTime: minutesToTime(cursor),
-        endTime: minutesToTime(busy.start),
-        durationMinutes: busy.start - cursor,
-      });
-    }
-    cursor = Math.max(cursor, busy.end);
-  }
-
-  if (windowEndMin - cursor >= minDuration) {
-    freeSlots.push({
-      startTime: minutesToTime(cursor),
-      endTime: minutesToTime(windowEndMin),
-      durationMinutes: windowEndMin - cursor,
-    });
-  }
-
-  return freeSlots;
+function diffDays(baseDateStr: string, targetDateStr: string): number {
+  const [y1, m1, d1] = baseDateStr.split('-').map(Number);
+  const [y2, m2, d2] = targetDateStr.split('-').map(Number);
+  if (!y1 || !m1 || !d1 || !y2 || !m2 || !d2) return 0;
+  const t1 = Date.UTC(y1, m1 - 1, d1);
+  const t2 = Date.UTC(y2, m2 - 1, d2);
+  return Math.round((t2 - t1) / (1000 * 60 * 60 * 24));
 }
 
 /**
- * Computes detailed free intervals labeled by who is free in that time window:
- * 'both' (Partner 1 & Partner 2), 'partner1' only, or 'partner2' only.
+ * Projects a ScheduleItem onto an N-day timeline starting at `windowStartDate`
+ * (where 1 day = 1440 minutes, 2 days = 2880 minutes).
  */
-export function computeDetailedFreeSlots(
+export function getItemTimelineRange(
+  item: ScheduleItem,
+  windowStartDate: string,
+  totalWindowMinutes: number
+): { start: number; end: number } | null {
+  const startDayOffset = diffDays(windowStartDate, item.date);
+  const itemEndDate = item.endDate || item.date;
+  const endDayOffset = diffDays(windowStartDate, itemEndDate);
+
+  const absStart = startDayOffset * 1440 + timeToMinutes(item.startTime);
+  const absEnd = endDayOffset * 1440 + timeToMinutes(item.endTime);
+
+  if (absEnd <= absStart) return null;
+  const clampedStart = Math.max(0, absStart);
+  const clampedEnd = Math.min(totalWindowMinutes, absEnd);
+  if (clampedEnd <= clampedStart) return null;
+  return { start: clampedStart, end: clampedEnd };
+}
+
+function offsetToDateAndTime(
+  windowStartDate: string,
+  offsetMinutes: number,
+  isEnd: boolean
+): { date: string; time: string } {
+  const clamped = Math.max(0, offsetMinutes);
+  const dayOffset = isEnd && clamped > 0 && clamped % 1440 === 0
+    ? Math.floor((clamped - 1) / 1440)
+    : Math.floor(clamped / 1440);
+  const minuteInDay = isEnd && clamped > 0 && clamped % 1440 === 0
+    ? 1439
+    : clamped % 1440;
+  return {
+    date: addDaysToDateStr(windowStartDate, dayOffset),
+    time: minutesToTime(minuteInDay),
+  };
+}
+
+/**
+ * Computes detailed free intervals labeled by who is free across a multi-day continuous window
+ * (e.g., 1 day = 24h for Kemarin, or 2 days = 48h continuous for Hari Ini -> Besok).
+ */
+export function computeWindowDetailedFreeSlots(
   schedules: ScheduleItem[],
-  targetDate: string,
-  options?: { windowStart?: string; windowEnd?: string; minDurationMinutes?: number }
+  windowStartDate: string,
+  numDays: 1 | 2,
+  options?: { minDurationMinutes?: number }
 ): AvailabilitySlot[] {
-  const windowStartMin = timeToMinutes(options?.windowStart ?? '00:00');
-  const windowEndMin = timeToMinutes(options?.windowEnd ?? '23:59');
+  const totalMinutes = numDays * 1440 - 1; // inclusive up to 23:59 on last day
   const minDuration = options?.minDurationMinutes ?? 30;
 
-  const daySchedules = schedules.filter((s) => s.date === targetDate);
-  const p1Busy = daySchedules
-    .filter((s) => s.owner === 'partner1' || s.owner === 'together')
-    .map((s) => ({
-      start: Math.max(windowStartMin, timeToMinutes(s.startTime)),
-      end: Math.min(windowEndMin, timeToMinutes(s.endTime)),
-    }))
-    .filter((iv) => iv.end > iv.start);
+  const p1Busy: Array<{ start: number; end: number }> = [];
+  const p2Busy: Array<{ start: number; end: number }> = [];
 
-  const p2Busy = daySchedules
-    .filter((s) => s.owner === 'partner2' || s.owner === 'together')
-    .map((s) => ({
-      start: Math.max(windowStartMin, timeToMinutes(s.startTime)),
-      end: Math.min(windowEndMin, timeToMinutes(s.endTime)),
-    }))
-    .filter((iv) => iv.end > iv.start);
+  for (const s of schedules) {
+    const range = getItemTimelineRange(s, windowStartDate, totalMinutes);
+    if (!range) continue;
+    if (s.owner === 'partner1' || s.owner === 'together') {
+      p1Busy.push(range);
+    }
+    if (s.owner === 'partner2' || s.owner === 'together') {
+      p2Busy.push(range);
+    }
+  }
 
-  const boundaries = new Set<number>([windowStartMin, windowEndMin]);
+  const boundaries = new Set<number>([0, totalMinutes]);
   for (const iv of [...p1Busy, ...p2Busy]) {
     boundaries.add(iv.start);
     boundaries.add(iv.end);
@@ -170,10 +162,34 @@ export function computeDetailedFreeSlots(
 
   return rawSegments
     .filter((seg) => seg.end - seg.start >= minDuration)
-    .map((seg) => ({
-      startTime: minutesToTime(seg.start),
-      endTime: minutesToTime(seg.end),
-      durationMinutes: seg.end - seg.start,
-      freeFor: seg.freeFor,
-    }));
+    .map((seg) => {
+      const startInfo = offsetToDateAndTime(windowStartDate, seg.start, false);
+      const endInfo = offsetToDateAndTime(windowStartDate, seg.end, true);
+      return {
+        startDate: startInfo.date,
+        endDate: endInfo.date,
+        startTime: startInfo.time,
+        endTime: endInfo.time,
+        durationMinutes: seg.end - seg.start,
+        freeFor: seg.freeFor,
+      };
+    });
+}
+
+export function computeDetailedFreeSlots(
+  schedules: ScheduleItem[],
+  targetDate: string,
+  options?: { minDurationMinutes?: number }
+): AvailabilitySlot[] {
+  return computeWindowDetailedFreeSlots(schedules, targetDate, 1, options);
+}
+
+export function computeMutualFreeSlots(
+  schedules: ScheduleItem[],
+  targetDate: string,
+  options?: { minDurationMinutes?: number }
+): FreeSlot[] {
+  return computeWindowDetailedFreeSlots(schedules, targetDate, 1, options).filter(
+    (s) => s.freeFor === 'both'
+  );
 }

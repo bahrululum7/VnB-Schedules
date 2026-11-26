@@ -5,20 +5,35 @@ import {
   CheckCircle2,
   History,
   Lock,
+  MoonStar,
   Plus,
   RotateCw,
   Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
-import type { DayKey, FreeSlot, SpinEvent, SpinnerOption } from '../types';
-import { formatDuration, timeToMinutes } from '../utils/freeTime';
+import type {
+  DayConfirmationState,
+  DayKey,
+  EditableDayKey,
+  FreeSlot,
+  SpinEvent,
+  SpinnerOption,
+} from '../types';
+import {
+  formatDuration,
+  formatShortIndonesianDate,
+  timeToMinutes,
+} from '../utils/freeTime';
 
 interface ActivitySpinnerProps {
   options: SpinnerOption[];
   lastSpin: SpinEvent | null;
   selectedDay: DayKey;
-  dateLabel: string;
+  yesterdayDate: string;
+  todayDate: string;
+  tomorrowDate: string;
+  confirmedByDate: Record<string, DayConfirmationState>;
   isReadOnly: boolean;
   freeSlots: FreeSlot[];
   canBookQualityTime: boolean;
@@ -27,6 +42,8 @@ interface ActivitySpinnerProps {
   onTriggerSpin: () => Promise<SpinEvent | null>;
   onInsertWinnerToSlot: (
     winnerLabel: string,
+    startDate: string,
+    endDate: string,
     startTime: string,
     endTime: string
   ) => Promise<string | null>;
@@ -45,7 +62,10 @@ export function ActivitySpinner({
   options,
   lastSpin,
   selectedDay,
-  dateLabel,
+  yesterdayDate,
+  todayDate,
+  tomorrowDate,
+  confirmedByDate,
   isReadOnly,
   freeSlots,
   canBookQualityTime,
@@ -62,8 +82,10 @@ export function ActivitySpinner({
   const [spunByName, setSpunByName] = useState<string | null>(null);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [selectedSlotIdx, setSelectedSlotIdx] = useState(0);
+  const [customStartDay, setCustomStartDay] = useState<EditableDayKey>('today');
   const [customStart, setCustomStart] = useState('');
   const [customEnd, setCustomEnd] = useState('');
+  const [crossMidnight, setCrossMidnight] = useState(false);
   const [inserting, setInserting] = useState(false);
   const [confirmedInserted, setConfirmedInserted] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -73,9 +95,10 @@ export function ActivitySpinner({
   const optionsCountRef = useRef<number>(options.length);
   optionsCountRef.current = options.length;
 
-  const freeSlotsKey = freeSlots.map((s) => `${s.startTime}-${s.endTime}`).join('|');
+  const freeSlotsKey = freeSlots
+    .map((s) => `${s.startDate}-${s.startTime}-${s.endDate}-${s.endTime}`)
+    .join('|');
 
-  // Cleanup timer only on unmount
   useEffect(() => {
     return () => {
       if (spinTimerRef.current !== null) {
@@ -84,18 +107,23 @@ export function ActivitySpinner({
     };
   }, []);
 
-  // Sync customStart/customEnd only when selected slot index, day, or actual free slots change
   useEffect(() => {
     const chosen = freeSlots[selectedSlotIdx] ?? freeSlots[0];
     if (chosen) {
+      const startsTomorrow = chosen.startDate === tomorrowDate;
+      const isOvernight = chosen.endDate !== chosen.startDate;
+      setCustomStartDay(startsTomorrow ? 'tomorrow' : 'today');
       setCustomStart(chosen.startTime);
       setCustomEnd(chosen.endTime);
+      setCrossMidnight(isOvernight);
     } else {
+      setCustomStartDay('today');
       setCustomStart('');
       setCustomEnd('');
+      setCrossMidnight(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedSlotIdx, freeSlotsKey, selectedDay]);
+  }, [selectedSlotIdx, freeSlotsKey, selectedDay, tomorrowDate]);
 
   useEffect(() => {
     setSelectedSlotIdx(0);
@@ -103,7 +131,6 @@ export function ActivitySpinner({
     setShowConfirmModal(false);
   }, [selectedDay]);
 
-  // Trigger wheel spin animation keyed strictly by lastSpin.id so polling never cancels the timer
   const spinId = lastSpin?.id ?? null;
   useEffect(() => {
     if (!lastSpin || !spinId || spinId === lastHandledSpinId.current) return;
@@ -142,6 +169,15 @@ export function ActivitySpinner({
     }, 3400);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spinId]);
+
+  const formatSlotOptionLabel = (slot: FreeSlot): string => {
+    const startShort = formatShortIndonesianDate(slot.startDate);
+    const endShort = formatShortIndonesianDate(slot.endDate);
+    if (slot.startDate === slot.endDate) {
+      return `${slot.startTime} – ${slot.endTime} (${startShort} · ${formatDuration(slot.durationMinutes)})`;
+    }
+    return `${slot.startTime} (${startShort}) – ${slot.endTime} (${endShort}) · ${formatDuration(slot.durationMinutes)}`;
+  };
 
   const handleAdd = async (e: FormEvent) => {
     e.preventDefault();
@@ -183,29 +219,70 @@ export function ActivitySpinner({
       return;
     }
 
-    const startMin = timeToMinutes(customStart);
-    const endMin = timeToMinutes(customEnd);
-    const slotStartMin = timeToMinutes(chosenSlot.startTime);
-    const slotEndMin = timeToMinutes(chosenSlot.endTime);
+    const pickedStartDate = customStartDay === 'tomorrow' ? tomorrowDate : todayDate;
+    const pickedCrossMidnight = customStartDay === 'today' && crossMidnight;
+    const pickedEndDate = pickedCrossMidnight ? tomorrowDate : pickedStartDate;
 
-    if (endMin <= startMin) {
-      setErrorMsg('Jam selesai harus lebih malam dari jam mulai.');
+    const startOffset =
+      (pickedStartDate === tomorrowDate ? 1440 : 0) + timeToMinutes(customStart);
+    const endOffset =
+      (pickedEndDate === tomorrowDate ? 1440 : 0) + timeToMinutes(customEnd);
+
+    if (endOffset <= startOffset) {
+      setErrorMsg(
+        'Jam selesai harus lebih malam dari jam mulai (aktifkan Lanjut ke Besok jika lintas tengah malam).'
+      );
       return;
     }
-    if (startMin < slotStartMin || endMin > slotEndMin) {
+    if (endOffset - startOffset > 1440) {
+      setErrorMsg('Durasi satu kegiatan maksimal 24 jam.');
+      return;
+    }
+
+    const slotStartOffset =
+      (chosenSlot.startDate === tomorrowDate ? 1440 : 0) +
+      timeToMinutes(chosenSlot.startTime);
+    const slotEndOffset =
+      (chosenSlot.endDate === tomorrowDate ? 1440 : 0) +
+      timeToMinutes(chosenSlot.endTime);
+
+    if (startOffset < slotStartOffset || endOffset > slotEndOffset) {
       setErrorMsg(
-        `Jam harus berada di dalam rentang kosong ${chosenSlot.startTime} – ${chosenSlot.endTime}.`
+        `Jam harus berada di dalam rentang kosong ${formatSlotOptionLabel(chosenSlot)}.`
+      );
+      return;
+    }
+
+    const startConf = confirmedByDate[pickedStartDate];
+    const endConf = confirmedByDate[pickedEndDate];
+    const startOk = Boolean(startConf?.partner1 && startConf?.partner2);
+    const endOk = Boolean(endConf?.partner1 && endConf?.partner2);
+    if (!startOk || !endOk) {
+      setErrorMsg(
+        pickedEndDate !== pickedStartDate
+          ? 'Quality Time lintas tengah malam memerlukan konfirmasi selesai dari kalian berdua untuk Hari Ini & Besok.'
+          : `Konfirmasi selesai isi jadwal pribadi berdua untuk ${formatShortIndonesianDate(pickedStartDate)} dulu ya.`
       );
       return;
     }
 
     setInserting(true);
-    const err = await onInsertWinnerToSlot(displayedWinner, customStart, customEnd);
+    const err = await onInsertWinnerToSlot(
+      displayedWinner,
+      pickedStartDate,
+      pickedEndDate,
+      customStart,
+      customEnd
+    );
     setInserting(false);
     if (err) {
       setErrorMsg(err);
     } else {
-      setConfirmedInserted(`${displayedWinner} (${customStart} – ${customEnd})`);
+      const rangeText =
+        pickedEndDate !== pickedStartDate
+          ? `${customStart} (${formatShortIndonesianDate(pickedStartDate)}) – ${customEnd} (${formatShortIndonesianDate(pickedEndDate)})`
+          : `${customStart} – ${customEnd} (${formatShortIndonesianDate(pickedStartDate)})`;
+      setConfirmedInserted(`${displayedWinner} (${rangeText})`);
       setDisplayedWinner(null);
       setShowConfirmModal(false);
     }
@@ -228,12 +305,134 @@ export function ActivitySpinner({
     return `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`;
   };
 
-  const dayText =
-    selectedDay === 'yesterday'
-      ? `Kemarin (${dateLabel})`
-      : selectedDay === 'today'
-        ? `Hari Ini (${dateLabel})`
-        : `Besok (${dateLabel})`;
+  const windowLabel = isReadOnly
+    ? `Kemarin (${formatShortIndonesianDate(yesterdayDate)})`
+    : `Hari Ini (${formatShortIndonesianDate(todayDate)}) → Besok (${formatShortIndonesianDate(tomorrowDate)})`;
+
+  const chosenSlot = freeSlots[selectedSlotIdx] ?? freeSlots[0];
+  const slotAllowsTomorrowStart = chosenSlot
+    ? chosenSlot.endDate === tomorrowDate
+    : false;
+  const slotAllowsTodayStart = chosenSlot
+    ? chosenSlot.startDate === todayDate
+    : false;
+
+  const renderSlotTimeInputs = (prefix: string) => (
+    <>
+      <div className="space-y-1.5">
+        <label htmlFor={`${prefix}-slot`} className="block text-xs text-zinc-400">
+          Rentang Jam Kosong ({windowLabel})
+        </label>
+        <select
+          id={`${prefix}-slot`}
+          value={selectedSlotIdx}
+          onChange={(e) => setSelectedSlotIdx(Number(e.target.value))}
+          className="w-full min-h-[42px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-2 text-xs font-mono-tabular text-white focus:outline-none focus:border-pink-400"
+        >
+          {freeSlots.map((slot, i) => (
+            <option
+              key={`${slot.startDate}-${slot.startTime}-${slot.endDate}-${slot.endTime}`}
+              value={i}
+            >
+              {formatSlotOptionLabel(slot)}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {slotAllowsTodayStart && slotAllowsTomorrowStart && (
+        <div className="grid grid-cols-2 gap-2 p-1 rounded-xl bg-[#14141B] border border-white/10">
+          <button
+            type="button"
+            onClick={() => setCustomStartDay('today')}
+            className={`min-h-[34px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+              customStartDay === 'today'
+                ? 'bg-pink-500 text-zinc-950'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            Mulai Hari Ini
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setCustomStartDay('tomorrow');
+              setCrossMidnight(false);
+            }}
+            className={`min-h-[34px] rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+              customStartDay === 'tomorrow'
+                ? 'bg-pink-500 text-zinc-950'
+                : 'text-zinc-400 hover:text-white'
+            }`}
+          >
+            Mulai Besok
+          </button>
+        </div>
+      )}
+
+      <div className="grid grid-cols-2 gap-3">
+        <div className="space-y-1">
+          <label htmlFor={`${prefix}-start`} className="block text-[11px] text-zinc-400">
+            Mulai Jam
+          </label>
+          <input
+            id={`${prefix}-start`}
+            type="time"
+            value={customStart}
+            onChange={(e) => {
+              const val = e.target.value;
+              setCustomStart(val);
+              if (
+                customStartDay === 'today' &&
+                val &&
+                customEnd &&
+                timeToMinutes(customEnd) <= timeToMinutes(val)
+              ) {
+                setCrossMidnight(true);
+              }
+            }}
+            className="w-full min-h-[40px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-1.5 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
+          />
+        </div>
+        <div className="space-y-1">
+          <label htmlFor={`${prefix}-end`} className="block text-[11px] text-zinc-400">
+            Selesai Jam
+          </label>
+          <input
+            id={`${prefix}-end`}
+            type="time"
+            value={customEnd}
+            onChange={(e) => {
+              const val = e.target.value;
+              setCustomEnd(val);
+              if (
+                customStartDay === 'today' &&
+                customStart &&
+                val &&
+                timeToMinutes(val) <= timeToMinutes(customStart)
+              ) {
+                setCrossMidnight(true);
+              }
+            }}
+            className="w-full min-h-[40px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-1.5 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
+          />
+        </div>
+      </div>
+
+      {customStartDay === 'today' && slotAllowsTomorrowStart && (
+        <label className="flex items-center gap-2.5 text-xs text-pink-200 cursor-pointer pt-1">
+          <input
+            type="checkbox"
+            checked={crossMidnight}
+            onChange={(e) => setCrossMidnight(e.target.checked)}
+            className="accent-pink-500 w-4 h-4 cursor-pointer"
+          />
+          <MoonStar className="w-3.5 h-3.5 text-pink-400 shrink-0" />
+          <span>Lanjut ke Besok ({formatShortIndonesianDate(tomorrowDate)})</span>
+        </label>
+      )}
+    </>
+  );
 
   return (
     <>
@@ -252,9 +451,9 @@ export function ActivitySpinner({
             </h2>
             <p className="text-sm text-zinc-400 mt-1">
               {isReadOnly
-                ? 'Tab Kemarin hanya menampilkan riwayat jadwal. Pindah ke Hari Ini atau Besok untuk memutar spinner.'
+                ? 'Tab Kemarin hanya menampilkan riwayat jadwal. Pindah ke Hari Ini → Besok untuk memutar spinner.'
                 : canBookQualityTime
-                  ? 'Isi kegiatan spinner, pilih jam kosong yang mau diisi, lalu putar dan konfirmasi hasilnya.'
+                  ? 'Isi kegiatan spinner, pilih jam kosong (termasuk malam sampai dini hari besok), lalu putar dan konfirmasi hasilnya.'
                   : 'Terbuka otomatis setelah kalian berdua konfirmasi selesai isi jadwal pribadi.'}
             </p>
           </div>
@@ -280,7 +479,8 @@ export function ActivitySpinner({
               Riwayat Kemarin Hanya Untuk Dilihat
             </p>
             <p className="text-sm text-zinc-400 max-w-md mx-auto">
-              Spinner tidak aktif di tab {dayText}. Pilih tab <span className="text-pink-300 font-medium">Hari Ini</span> atau <span className="text-pink-300 font-medium">Besok</span> untuk memutar spinner berdua.
+              Spinner tidak aktif di tab {windowLabel}. Pilih tab{' '}
+              <span className="text-pink-300 font-medium">Hari Ini → Besok</span> untuk memutar spinner berdua.
             </p>
           </div>
         ) : !canBookQualityTime ? (
@@ -290,14 +490,15 @@ export function ActivitySpinner({
               Spinner Masih Terkunci
             </p>
             <p className="text-sm text-zinc-400 max-w-md mx-auto">
-              Selesaikan jadwal pribadi masing-masing untuk {dayText} lalu tekan tombol <span className="text-pink-300 font-medium">Konfirmasi Selesai</span> agar spinner terbuka.
+              Selesaikan jadwal pribadi masing-masing lalu tekan tombol{' '}
+              <span className="text-pink-300 font-medium">Konfirmasi Hari Ini</span> atau{' '}
+              <span className="text-pink-300 font-medium">Konfirmasi Besok</span> agar spinner terbuka.
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
             {/* Left Column: Step 1 & Step 2 */}
             <div className="lg:col-span-6 space-y-6">
-              {/* Step 1 */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h3 className="font-display text-sm font-bold text-pink-300">
@@ -312,7 +513,7 @@ export function ActivitySpinner({
                     value={newLabel}
                     onChange={(e) => setNewLabel(e.target.value)}
                     maxLength={50}
-                    placeholder="Tambah ide kegiatan... (misal: Masak Bareng VC)"
+                    placeholder="Tambah ide kegiatan... (misal: Sleep Call Malam)"
                     className="flex-1 min-h-[44px] rounded-xl bg-[#0E0E13] border border-white/15 px-3.5 py-2 text-sm text-white placeholder:text-zinc-500 focus:outline-none focus:border-pink-400"
                   />
                   <button
@@ -356,7 +557,6 @@ export function ActivitySpinner({
                 </div>
               </div>
 
-              {/* Step 2 */}
               <div className="space-y-3 pt-4 border-t border-white/[0.07]">
                 <h3 className="font-display text-sm font-bold text-pink-300">
                   2. Pilih Jam Kosong yang Mau Diisi Hasil Spinner
@@ -364,54 +564,11 @@ export function ActivitySpinner({
 
                 {freeSlots.length === 0 ? (
                   <p className="text-xs text-zinc-400 rounded-xl bg-[#0E0E13] border border-white/10 p-3.5">
-                    Tidak ada jam kosong minimal 30 menit di {dayText}. Coba cek hari lain atau geser jadwal dulu.
+                    Tidak ada jam kosong minimal 30 menit di rentang {windowLabel}.
                   </p>
                 ) : (
                   <div className="rounded-xl bg-[#0E0E13] border border-white/10 p-4 space-y-3">
-                    <div className="space-y-1.5">
-                      <label htmlFor="spinner-free-slot" className="block text-xs text-zinc-400">
-                        Rentang Jam Kosong ({dayText})
-                      </label>
-                      <select
-                        id="spinner-free-slot"
-                        value={selectedSlotIdx}
-                        onChange={(e) => setSelectedSlotIdx(Number(e.target.value))}
-                        className="w-full min-h-[42px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-2 text-xs font-mono-tabular text-white focus:outline-none focus:border-pink-400"
-                      >
-                        {freeSlots.map((slot, i) => (
-                          <option key={`${slot.startTime}-${slot.endTime}`} value={i}>
-                            {slot.startTime} – {slot.endTime} ({formatDuration(slot.durationMinutes)} kosong)
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-1">
-                        <label htmlFor="spin-start-time" className="block text-[11px] text-zinc-400">
-                          Mulai Jam
-                        </label>
-                        <input
-                          id="spin-start-time"
-                          type="time"
-                          value={customStart}
-                          onChange={(e) => setCustomStart(e.target.value)}
-                          className="w-full min-h-[40px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-1.5 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
-                        />
-                      </div>
-                      <div className="space-y-1">
-                        <label htmlFor="spin-end-time" className="block text-[11px] text-zinc-400">
-                          Selesai Jam
-                        </label>
-                        <input
-                          id="spin-end-time"
-                          type="time"
-                          value={customEnd}
-                          onChange={(e) => setCustomEnd(e.target.value)}
-                          className="w-full min-h-[40px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-1.5 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
-                        />
-                      </div>
-                    </div>
+                    {renderSlotTimeInputs('spinner-main')}
 
                     <button
                       type="button"
@@ -431,10 +588,9 @@ export function ActivitySpinner({
               </div>
             </div>
 
-            {/* Right Column: Wheel + Quick Re-open Card */}
+            {/* Right Column: Wheel + Result Banner */}
             <div className="lg:col-span-6 flex flex-col items-center justify-center space-y-5">
               <div className="relative w-full max-w-[300px] aspect-square flex items-center justify-center">
-                {/* Pointer Triangle */}
                 <div
                   className="absolute -top-2 left-1/2 -translate-x-1/2 z-20 drop-shadow"
                   aria-hidden="true"
@@ -528,7 +684,6 @@ export function ActivitySpinner({
         )}
       </section>
 
-      {/* Instant Popup Confirmation Card when Spinner Lands */}
       <AnimatePresence>
         {showConfirmModal && displayedWinner && (
           <motion.div
@@ -545,7 +700,7 @@ export function ActivitySpinner({
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.9, opacity: 0 }}
               transition={{ type: 'spring', stiffness: 360, damping: 24 }}
-              className="relative w-full max-w-md rounded-2xl bg-[#15151E] border border-pink-400/45 p-6 shadow-2xl shadow-pink-500/20 space-y-5"
+              className="relative w-full max-w-md rounded-2xl bg-[#15151E] border border-pink-400/45 p-6 shadow-2xl shadow-pink-500/20 space-y-5 max-h-[92vh] overflow-y-auto"
             >
               <button
                 type="button"
@@ -573,54 +728,11 @@ export function ActivitySpinner({
 
               {freeSlots.length > 0 ? (
                 <div className="rounded-xl bg-[#0E0E13] border border-white/10 p-4 space-y-3">
-                  <div className="space-y-1.5">
-                    <label htmlFor="modal-spin-slot" className="block text-xs text-zinc-400">
-                      Masukkan ke Jam Kosong ({dayText})
-                    </label>
-                    <select
-                      id="modal-spin-slot"
-                      value={selectedSlotIdx}
-                      onChange={(e) => setSelectedSlotIdx(Number(e.target.value))}
-                      className="w-full min-h-[42px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-2 text-xs font-mono-tabular text-white focus:outline-none focus:border-pink-400"
-                    >
-                      {freeSlots.map((slot, i) => (
-                        <option key={`${slot.startTime}-${slot.endTime}`} value={i}>
-                          {slot.startTime} – {slot.endTime} ({formatDuration(slot.durationMinutes)} kosong)
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <label htmlFor="modal-spin-start" className="block text-[11px] text-zinc-400">
-                        Mulai Jam
-                      </label>
-                      <input
-                        id="modal-spin-start"
-                        type="time"
-                        value={customStart}
-                        onChange={(e) => setCustomStart(e.target.value)}
-                        className="w-full min-h-[40px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-1.5 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <label htmlFor="modal-spin-end" className="block text-[11px] text-zinc-400">
-                        Selesai Jam
-                      </label>
-                      <input
-                        id="modal-spin-end"
-                        type="time"
-                        value={customEnd}
-                        onChange={(e) => setCustomEnd(e.target.value)}
-                        className="w-full min-h-[40px] rounded-xl bg-[#14141B] border border-white/15 px-3 py-1.5 text-sm font-mono-tabular text-white focus:outline-none focus:border-pink-400"
-                      />
-                    </div>
-                  </div>
+                  {renderSlotTimeInputs('spinner-modal')}
                 </div>
               ) : (
                 <p className="text-xs text-center text-zinc-400">
-                  Belum ada jam kosong yang tersisa di {dayText}.
+                  Belum ada jam kosong yang tersisa di {windowLabel}.
                 </p>
               )}
 

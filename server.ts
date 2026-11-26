@@ -418,6 +418,16 @@ function isValidDateStr(d: unknown): d is string {
   return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d);
 }
 
+function addOneDayStr(dateStr: string): string {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return dateStr;
+  const dt = new Date(Date.UTC(y, m - 1, d + 1));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
 function isDateWithinServerWindow(dateStr: string): boolean {
   const [y, m, d] = dateStr.split('-').map(Number);
   if (!y || !m || !d) return false;
@@ -445,6 +455,11 @@ function getDateConf(dateStr: string): DayConfirmationState {
       partner2: false,
     }
   );
+}
+
+function isDateConfirmedByBoth(dateStr: string): boolean {
+  const c = getDateConf(dateStr);
+  return Boolean(c.partner1 && c.partner2);
 }
 
 const VALID_OWNERS = new Set<ScheduleOwner>(['partner1', 'partner2', 'together']);
@@ -807,6 +822,11 @@ app.post('/api/state/reconcile', requireAuth, async (req, res) => {
         continue;
       }
       if (!isValidDateStr(item.date) || !isDateWithinServerWindow(item.date)) continue;
+      const itemEndDate =
+        isValidDateStr(item.endDate) &&
+        (item.endDate === item.date || item.endDate === addOneDayStr(item.date))
+          ? item.endDate
+          : item.date;
       if (
         typeof item.title !== 'string' ||
         item.title.trim().length < 1 ||
@@ -815,7 +835,10 @@ app.post('/api/state/reconcile', requireAuth, async (req, res) => {
         continue;
       }
       if (!isValidTime(item.startTime) || !isValidTime(item.endTime)) continue;
-      if (timeMinutes(item.endTime) <= timeMinutes(item.startTime)) continue;
+      const startMin = timeMinutes(item.startTime);
+      const endMin =
+        itemEndDate > item.date ? 24 * 60 + timeMinutes(item.endTime) : timeMinutes(item.endTime);
+      if (endMin <= startMin || endMin - startMin > 24 * 60) continue;
 
       const resolvedCategory: ActivityCategory =
         typeof item.category === 'string' &&
@@ -828,6 +851,7 @@ app.post('/api/state/reconcile', requireAuth, async (req, res) => {
       workspaceState.schedules.push({
         id: item.id,
         date: item.date,
+        ...(itemEndDate !== item.date ? { endDate: itemEndDate } : {}),
         owner: item.owner,
         title: item.title.trim(),
         category: resolvedCategory,
@@ -849,8 +873,10 @@ app.post('/api/state/reconcile', requireAuth, async (req, res) => {
 
   if (changed) {
     workspaceState.deletedScheduleIds = Array.from(deletedSet).slice(-300);
-    workspaceState.schedules.sort(
-      (a, b) => timeMinutes(a.startTime) - timeMinutes(b.startTime)
+    workspaceState.schedules.sort((a, b) =>
+      a.date !== b.date
+        ? a.date.localeCompare(b.date)
+        : timeMinutes(a.startTime) - timeMinutes(b.startTime)
     );
     await persistState();
   }
@@ -861,8 +887,9 @@ app.post('/api/state/reconcile', requireAuth, async (req, res) => {
 
 app.post('/api/schedules', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const { date, clientToday, owner, title, category, startTime, endTime } = req.body as {
+  const { date, endDate, clientToday, owner, title, category, startTime, endTime } = req.body as {
     date?: unknown;
+    endDate?: unknown;
     clientToday?: unknown;
     owner?: unknown;
     title?: unknown;
@@ -873,6 +900,13 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
 
   if (!isValidDateStr(date) || !isDateWithinServerWindow(date)) {
     res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
+    return;
+  }
+
+  const resolvedEndDate = isValidDateStr(endDate) ? endDate : date;
+  const nextDayStr = addOneDayStr(date);
+  if (resolvedEndDate !== date && resolvedEndDate !== nextDayStr) {
+    res.status(400).json({ error: 'Tanggal selesai maksimal hari berikutnya (lintas tengah malam).' });
     return;
   }
 
@@ -895,12 +929,18 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
     return;
   }
 
-  const dayConf = getDateConf(date);
-  if (resolvedOwner === 'together' && (!dayConf.partner1 || !dayConf.partner2)) {
-    res.status(400).json({
-      error: 'Konfirmasi selesai isi jadwal pribadi berdua dulu sebelum mengisi Quality Time ya.',
-    });
-    return;
+  if (resolvedOwner === 'together') {
+    const startOk = isDateConfirmedByBoth(date);
+    const endOk = resolvedEndDate === date || isDateConfirmedByBoth(resolvedEndDate);
+    if (!startOk || !endOk) {
+      res.status(400).json({
+        error:
+          resolvedEndDate !== date
+            ? 'Untuk Quality Time lintas tengah malam, konfirmasi selesai isi jadwal pribadi untuk Hari Ini dan Besok dulu ya.'
+            : 'Konfirmasi selesai isi jadwal pribadi berdua dulu sebelum mengisi Quality Time ya.',
+      });
+      return;
+    }
   }
 
   if (typeof title !== 'string' || title.trim().length < 1 || title.trim().length > 80) {
@@ -913,8 +953,18 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
     return;
   }
 
-  if (timeMinutes(endTime) <= timeMinutes(startTime)) {
-    res.status(400).json({ error: 'Jam selesai harus lebih malam dari jam mulai.' });
+  const startTotalMin = timeMinutes(startTime);
+  const endTotalMin =
+    resolvedEndDate > date ? 24 * 60 + timeMinutes(endTime) : timeMinutes(endTime);
+
+  if (endTotalMin <= startTotalMin) {
+    res.status(400).json({
+      error: 'Jam selesai harus lebih malam dari jam mulai (atau pilih lanjut ke Besok).',
+    });
+    return;
+  }
+  if (endTotalMin - startTotalMin > 24 * 60) {
+    res.status(400).json({ error: 'Durasi satu jadwal maksimal 24 jam.' });
     return;
   }
 
@@ -931,6 +981,7 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
   const newItem: ScheduleItem = {
     id: `sch-${ownerTag}-${crypto.randomUUID()}`,
     date,
+    ...(resolvedEndDate !== date ? { endDate: resolvedEndDate } : {}),
     owner: resolvedOwner,
     title: title.trim(),
     category: resolvedCategory,
@@ -941,8 +992,10 @@ app.post('/api/schedules', requireAuth, async (req, res) => {
   };
 
   workspaceState.schedules.push(newItem);
-  workspaceState.schedules.sort(
-    (a, b) => timeMinutes(a.startTime) - timeMinutes(b.startTime)
+  workspaceState.schedules.sort((a, b) =>
+    a.date !== b.date
+      ? a.date.localeCompare(b.date)
+      : timeMinutes(a.startTime) - timeMinutes(b.startTime)
   );
 
   await persistState();
@@ -965,7 +1018,8 @@ app.delete('/api/schedules/:id', requireAuth, async (req, res) => {
     res.json({ ok: true, state: workspaceState });
     return;
   }
-  if (isValidDateStr(clientToday) && target.date < clientToday) {
+  const effectiveEndDate = target.endDate || target.date;
+  if (isValidDateStr(clientToday) && effectiveEndDate < clientToday) {
     res.status(400).json({
       error: 'Riwayat jadwal kemarin tidak bisa dihapus.',
     });
@@ -1021,14 +1075,20 @@ app.post('/api/schedules/confirm', requireAuth, async (req, res) => {
 
 app.post('/api/spinner/options', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const { label, date } = req.body as { label?: unknown; date?: unknown };
+  const { label, date, secondaryDate } = req.body as {
+    label?: unknown;
+    date?: unknown;
+    secondaryDate?: unknown;
+  };
 
   if (!isValidDateStr(date)) {
     res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
     return;
   }
-  const dayConf = getDateConf(date);
-  if (!dayConf.partner1 || !dayConf.partner2) {
+  const hasConfirmed =
+    isDateConfirmedByBoth(date) ||
+    (isValidDateStr(secondaryDate) && isDateConfirmedByBoth(secondaryDate));
+  if (!hasConfirmed) {
     res.status(400).json({
       error: 'Spinner terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.',
     });
@@ -1055,12 +1115,15 @@ app.post('/api/spinner/options', requireAuth, async (req, res) => {
 app.delete('/api/spinner/options/:id', requireAuth, async (req, res) => {
   const id = req.params.id;
   const dateParam = req.query.date;
+  const secondaryDateParam = req.query.secondaryDate;
   if (!isValidDateStr(dateParam)) {
     res.status(400).json({ error: 'Tanggal jadwal tidak valid.' });
     return;
   }
-  const dayConf = getDateConf(dateParam);
-  if (!dayConf.partner1 || !dayConf.partner2) {
+  const hasConfirmed =
+    isDateConfirmedByBoth(dateParam) ||
+    (isValidDateStr(secondaryDateParam) && isDateConfirmedByBoth(secondaryDateParam));
+  if (!hasConfirmed) {
     res.status(400).json({
       error: 'Spinner terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.',
     });
@@ -1079,8 +1142,9 @@ app.delete('/api/spinner/options/:id', requireAuth, async (req, res) => {
 
 app.post('/api/spinner/spin', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const { date, clientToday } = (req.body ?? {}) as {
+  const { date, secondaryDate, clientToday } = (req.body ?? {}) as {
     date?: unknown;
+    secondaryDate?: unknown;
     clientToday?: unknown;
   };
   if (!isValidDateStr(date)) {
@@ -1091,8 +1155,10 @@ app.post('/api/spinner/spin', requireAuth, async (req, res) => {
     res.status(400).json({ error: 'Riwayat kemarin tidak bisa diputar di spinner.' });
     return;
   }
-  const dayConf = getDateConf(date);
-  if (!dayConf.partner1 || !dayConf.partner2) {
+  const hasConfirmed =
+    isDateConfirmedByBoth(date) ||
+    (isValidDateStr(secondaryDate) && isDateConfirmedByBoth(secondaryDate));
+  if (!hasConfirmed) {
     res.status(400).json({
       error: 'Spinner terbuka setelah kalian berdua konfirmasi selesai isi jadwal pribadi.',
     });

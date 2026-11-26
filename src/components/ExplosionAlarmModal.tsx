@@ -112,7 +112,9 @@ export function ExplosionAlarmModal({ alarm, onDismiss }: ExplosionAlarmModalPro
             </div>
 
             <p className="font-mono-tabular text-xs font-medium tracking-wide text-pink-300 mb-2">
-              {alarm.item.startTime} – {alarm.item.endTime} · {formatShortIndonesianDate(alarm.item.date)}
+              {alarm.item.endDate && alarm.item.endDate !== alarm.item.date
+                ? `${alarm.item.startTime} (${formatShortIndonesianDate(alarm.item.date)}) – ${alarm.item.endTime} (${formatShortIndonesianDate(alarm.item.endDate)})`
+                : `${alarm.item.startTime} – ${alarm.item.endTime} · ${formatShortIndonesianDate(alarm.item.date)}`}
             </p>
 
             <h2

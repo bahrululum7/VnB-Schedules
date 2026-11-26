@@ -40,3 +40,39 @@ export function playCuteAlarmChime(): void {
     // Ignore audio context autoplay restrictions cleanly.
   }
 }
+
+export function playPopSound(equip = true): void {
+  try {
+    const AudioContextClass =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextClass) return;
+
+    if (!audioCtx) {
+      audioCtx = new AudioContextClass();
+    }
+    if (audioCtx.state === 'suspended') {
+      void audioCtx.resume();
+    }
+
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(equip ? 440 : 520, now);
+    osc.frequency.exponentialRampToValueAtTime(equip ? 760 : 320, now + 0.065);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.exponentialRampToValueAtTime(0.11, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.08);
+  } catch {
+    // Ignore audio context restrictions cleanly.
+  }
+}

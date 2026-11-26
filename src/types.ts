@@ -1,6 +1,6 @@
 export type PartnerSlot = 'partner1' | 'partner2';
 export type ScheduleOwner = PartnerSlot | 'together';
-export type DayKey = 'yesterday' | 'today' | 'tomorrow';
+export type DayKey = 'yesterday' | 'continuous';
 export type EditableDayKey = 'today' | 'tomorrow';
 export type ActivityCategory =
   | 'kuliah'
@@ -20,7 +20,8 @@ export interface PartnerProfile {
 
 export interface ScheduleItem {
   id: string;
-  date: string; // YYYY-MM-DD
+  date: string; // Start date YYYY-MM-DD
+  endDate?: string; // End date YYYY-MM-DD (defaults to date; next day for overnight e.g. 22:00 -> 03:00)
   owner: ScheduleOwner;
   title: string;
   category: ActivityCategory;
@@ -76,6 +77,8 @@ export interface AuthenticatedUser {
 }
 
 export interface FreeSlot {
+  startDate: string;
+  endDate: string;
   startTime: string;
   endTime: string;
   durationMinutes: number;

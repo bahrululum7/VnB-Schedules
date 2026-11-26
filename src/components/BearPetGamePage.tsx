@@ -33,12 +33,12 @@ import {
   BATH_COOLDOWN_MS,
   FEED_COOLDOWN_MS,
   FRUIT_SELL_COINS,
+  LEVEL_UP_MIN_HAPPINESS,
   MAX_FRUIT_GRAMS,
   MAX_WATERINGS_PER_DAY,
   PLAY_COOLDOWN_MS,
   SNACK_CATALOG,
   TREE_WATER_COOLDOWN_MS,
-  XP_PER_LEVEL,
   formatRemainingDuration,
 } from '../utils/petGameEngine';
 import { playPopSound } from '../utils/sound';
@@ -220,8 +220,8 @@ export function BearPetGamePage({
   };
 
   const { pet, tree, inventory, rewards, milestoneRewards, claimedHistory } = game;
-  const levelProgressXp = pet.xp % XP_PER_LEVEL;
-  const levelProgressPct = Math.min(100, Math.round((levelProgressXp / XP_PER_LEVEL) * 100));
+  const roundedHappiness = Math.round(pet.happiness);
+  const qualifiesForTomorrowLevelUp = roundedHappiness > LEVEL_UP_MIN_HAPPINESS;
   const nextMilestoneLevel = Math.floor(pet.level / 10) * 10 + 10;
 
   // Live cooldown calculations
@@ -809,7 +809,7 @@ export function BearPetGamePage({
                         </button>
                       </div>
 
-                      {/* Claim 1 of 3 Admin Rewards */}
+                      {/* Claim 1 of 3 Harvest Rewards */}
                       <div className="rounded-2xl bg-[#161622]/95 border border-white/15 p-3.5 space-y-2.5">
                         <div className="flex items-center justify-between">
                           <p className="text-xs font-bold text-white inline-flex items-center gap-1.5">
@@ -992,20 +992,38 @@ export function BearPetGamePage({
               />
             </div>
 
-            {/* XP & Level Bar */}
+            {/* Daily Level Qualification Bar */}
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs text-zinc-300 tabular-nums">
-                <span>Progres Level {pet.level} → {pet.level + 1}</span>
-                <span className="font-mono-tabular font-semibold text-pink-300">
-                  {levelProgressXp} / {XP_PER_LEVEL} XP (Total {pet.xp} XP)
+                <span>Naik Level Harian (Syarat Bahagia &gt; 80%)</span>
+                <span
+                  className={`font-mono-tabular font-semibold ${
+                    qualifiesForTomorrowLevelUp ? 'text-emerald-300' : 'text-amber-300'
+                  }`}
+                >
+                  Bahagia: {roundedHappiness}% {qualifiesForTomorrowLevelUp ? '(Siap Naik Level)' : '(Perlu >80%)'}
                 </span>
               </div>
-              <div className="h-2.5 rounded-full bg-[#0B0B0F] border border-white/10 overflow-hidden">
+              <div className="relative h-2.5 rounded-full bg-[#0B0B0F] border border-white/10 overflow-hidden">
                 <div
-                  className="h-full bg-gradient-to-r from-pink-500 to-amber-400 transition-all duration-300"
-                  style={{ width: `${levelProgressPct}%` }}
+                  className={`h-full transition-all duration-300 ${
+                    qualifiesForTomorrowLevelUp
+                      ? 'bg-gradient-to-r from-emerald-500 to-pink-400'
+                      : 'bg-gradient-to-r from-amber-500 to-rose-400'
+                  }`}
+                  style={{ width: `${Math.min(100, roundedHappiness)}%` }}
+                />
+                <div
+                  className="absolute top-0 bottom-0 w-0.5 bg-white/80"
+                  style={{ left: '80%' }}
+                  title="Batas minimum 80%"
                 />
               </div>
+              <p className="text-[11px] text-zinc-400">
+                {qualifiesForTomorrowLevelUp
+                  ? `Pertahankan kebahagiaan di atas 80% sampai pergantian hari agar ${pet.name} naik ke Level ${pet.level + 1}.`
+                  : `Jika saat berganti hari kebahagiaan masih ≤80%, level ${pet.name} tidak akan naik.`}
+              </p>
             </div>
           </section>
 
@@ -1021,7 +1039,7 @@ export function BearPetGamePage({
               </span>
             </div>
             <p className="text-xs text-zinc-400 leading-relaxed">
-              Setiap kali {pet.name} mencapai kelipatan level 10 (Level 10, 20, 30, dst.), sistem akan otomatis memilih 1 hadiah acak dari daftar di menu Admin:
+              Setiap kali {pet.name} mencapai kelipatan level 10 (Level 10, 20, 30, dst.), sistem otomatis memilih 1 hadiah acak dari daftar berikut:
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
               {milestoneRewards.map((mr) => (
@@ -1043,7 +1061,10 @@ export function BearPetGamePage({
             </h2>
             <ul className="space-y-2 text-xs text-zinc-300 leading-relaxed">
               <li>
-                <strong className="text-white">Tidur Real-Time:</strong> 1 menit tidur menambah +1% energi. Makan (jeda 30 menit), main (jeda 45 menit), dan mandi (jeda 1 jam) punya waktu tunggu alami.
+                <strong className="text-white">Naik Level Harian:</strong> Beruang naik 1 level setiap pergantian hari (1 hari = +1 level) dengan syarat kebahagiaan berada di atas 80%.
+              </li>
+              <li>
+                <strong className="text-white">Tidur Real-Time:</strong> 1 menit tidur menambah +1% energi. Makan (jeda 30 menit), main (jeda 45 menit), dan mandi (jeda 1 jam) mengikuti waktu tunggu alami.
               </li>
               <li>
                 <strong className="text-white">Kelelahan:</strong> Jika energi turun ke ≤20%, beruang kelelahan dan harus ditidurkan sebelum bisa main atau menyiram pohon.
@@ -1052,7 +1073,7 @@ export function BearPetGamePage({
                 <strong className="text-white">Siram Pohon (2x/Hari, Jeda 8 Jam):</strong> Siram 2 kali sehari dengan jarak 8 jam antara siraman ke-1 dan ke-2. Lupa 1 hari membuat pohon melayu; lupa 2 hari dalam 3 hari membuat pohon mati.
               </li>
               <li>
-                <strong className="text-white">Panen 1 kg & Toko NPC:</strong> Pada hari ke-3 pohon berbuah 1 kg (1.000 g). Petik ke keranjang & inventory, lalu jual di Toko NPC untuk memilih 1 dari 3 hadiah Admin.
+                <strong className="text-white">Panen 1 kg & Toko NPC:</strong> Pada hari ke-3 pohon berbuah 1 kg (1.000 g). Petik ke keranjang & inventory, lalu jual di Toko NPC untuk memilih 1 dari 3 hadiah spesial.
               </li>
             </ul>
           </section>

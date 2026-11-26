@@ -74,10 +74,10 @@ export const DEFAULT_MILESTONE_REWARDS: AdminRewardOption[] = [
 export const MAX_FRUIT_GRAMS = 1000; // 1 kg maksimal
 export const FRUIT_SELL_COINS = 150;
 
-// Real-time slow pacing & anti-farming cooldowns
-export const XP_PER_LEVEL = 200; // Lv 10 = 1.800 XP, Lv 20 = 3.800 XP, Lv 30 = 5.800 XP
+// Real-time slow pacing & day-based leveling
+export const LEVEL_UP_MIN_HAPPINESS = 80; // Harus bahagia DI ATAS 80% (> 80) saat pergantian hari
 export const SLEEP_ENERGY_PER_MIN = 1; // 1 menit tidur = +1% energi (100 menit untuk 0->100%)
-export const SLEEP_XP_MIN_MS = 30 * 60 * 1000; // Minimal tidur 30 menit baru dapat bonus XP bangun
+export const SLEEP_XP_MIN_MS = 30 * 60 * 1000; // Minimal tidur 30 menit
 
 export const FEED_COOLDOWN_MS = 30 * 60 * 1000; // 30 menit antar makan
 export const BATH_COOLDOWN_MS = 60 * 60 * 1000; // 1 jam antar mandi
@@ -88,11 +88,6 @@ export const TREE_WATER_COOLDOWN_MS = 8 * 60 * 60 * 1000; // 8 jam antara sirama
 export function clampStat(val: number): number {
   const clamped = Math.max(0, Math.min(100, val));
   return Math.round(clamped * 100) / 100;
-}
-
-export function computeLevelFromXp(xp: number): number {
-  const safeXp = Math.max(0, Math.floor(xp));
-  return Math.floor(safeXp / XP_PER_LEVEL) + 1;
 }
 
 export function computeGrowthStage(level: number): BearGrowthStage {
@@ -150,6 +145,7 @@ export function createInitialPetGameState(todayStr = formatServerTodayISO()): Pe
       lastBathedAt: 0,
       lastPlayedAt: 0,
       sleepStartedAt: 0,
+      lastLevelCheckDate: todayStr,
       lastMilestoneLevelRewarded: 0,
     },
     tree: {
@@ -193,7 +189,10 @@ export function normalizePetGameState(
     typeof rawPet.xp === 'number' && Number.isFinite(rawPet.xp)
       ? Math.max(0, Math.round(rawPet.xp))
       : 0;
-  const level = computeLevelFromXp(xp);
+  const level =
+    typeof rawPet.level === 'number' && Number.isFinite(rawPet.level) && rawPet.level >= 1
+      ? Math.round(rawPet.level)
+      : 1;
   const energy = clampStat(typeof rawPet.energy === 'number' ? rawPet.energy : base.pet.energy);
   const isSleeping = Boolean(rawPet.isSleeping);
   const isExhausted = isSleeping ? false : energy <= 20 || Boolean(rawPet.isExhausted && energy < 50);
@@ -232,6 +231,11 @@ export function normalizePetGameState(
       typeof rawPet.sleepStartedAt === 'number' && Number.isFinite(rawPet.sleepStartedAt)
         ? rawPet.sleepStartedAt
         : 0,
+    lastLevelCheckDate:
+      typeof rawPet.lastLevelCheckDate === 'string' &&
+      /^\d{4}-\d{2}-\d{2}$/.test(rawPet.lastLevelCheckDate)
+        ? rawPet.lastLevelCheckDate
+        : todayStr,
     lastMilestoneLevelRewarded:
       typeof rawPet.lastMilestoneLevelRewarded === 'number' &&
       Number.isFinite(rawPet.lastMilestoneLevelRewarded)
@@ -353,8 +357,8 @@ export function normalizePetGameState(
 /**
  * Advances Pou stats at realistic multi-hour pacing:
  * - Sleeping recovers +1% energy per 1 minute (100 minutes for 0 -> 100%)
- * - Awake stats decay gradually over ~6-9 hours
- * - Tree checks 2x/day watering (with 8h gap enforced on action) over a 3-day cycle
+ * - Level increases +1 per calendar day ONLY if happiness > 80% when the day changes
+ * - Tree checks 2x/day watering (8h gap enforced on action) over a 3-day cycle
  */
 export function advancePetAndTreeTime(
   state: PetGameState,
@@ -365,6 +369,26 @@ export function advancePetAndTreeTime(
   const pet = { ...state.pet };
   const tree = { ...state.tree };
 
+  // 1. Check daily level progression BEFORE multi-hour unattended decay wipes yesterday's happiness
+  const petDayDiff =
+    forcedDaysAdvance > 0
+      ? forcedDaysAdvance
+      : calendarDaysBetween(pet.lastLevelCheckDate, todayStr);
+
+  if (petDayDiff > 0) {
+    for (let step = 0; step < Math.min(petDayDiff, 10); step++) {
+      if (step > 0) {
+        // Extra unattended days naturally lower happiness so skipped days don't auto-level
+        pet.happiness = clampStat(pet.happiness - 28);
+      }
+      if (Math.round(pet.happiness) > LEVEL_UP_MIN_HAPPINESS) {
+        pet.level += 1;
+      }
+    }
+    pet.lastLevelCheckDate = todayStr;
+  }
+
+  // 2. Real-time stat progression based on elapsed minutes
   const elapsedMs = Math.max(0, nowMs - pet.lastUpdatedAt);
   const elapsedMinutes = Math.min(24 * 60, elapsedMs / 60000);
 
@@ -375,18 +399,20 @@ export function advancePetAndTreeTime(
       pet.energy = clampStat(pet.energy + gained);
       pet.hunger = clampStat(pet.hunger - elapsedMinutes * 0.08);
       pet.hygiene = clampStat(pet.hygiene - elapsedMinutes * 0.05);
+      pet.happiness = clampStat(pet.happiness - elapsedMinutes * 0.02);
       if (pet.energy >= 100) {
         pet.energy = 100;
         pet.isSleeping = false;
+        pet.sleepStartedAt = 0;
         pet.isExhausted = false;
       }
     } else {
-      // Multi-hour realistic awake decay (~6-9 hours from full to empty)
+      // Multi-hour realistic awake decay
       pet.hunger = clampStat(pet.hunger - elapsedMinutes * 0.22);
       pet.hygiene = clampStat(pet.hygiene - elapsedMinutes * 0.18);
       pet.energy = clampStat(pet.energy - elapsedMinutes * 0.2);
       const moodDecay =
-        pet.hunger < 25 || pet.hygiene < 25 || pet.energy <= 20 ? 0.35 : 0.14;
+        pet.hunger < 25 || pet.hygiene < 25 || pet.energy <= 20 ? 0.3 : 0.1;
       pet.happiness = clampStat(pet.happiness - elapsedMinutes * moodDecay);
       if (pet.energy <= 20) {
         pet.isExhausted = true;
@@ -395,14 +421,14 @@ export function advancePetAndTreeTime(
     pet.lastUpdatedAt = nowMs;
   }
 
-  // Tree day rollover (requires 2 waterings/day)
-  const calendarDiff =
+  // 3. Tree day rollover (requires 2 waterings/day)
+  const treeDayDiff =
     forcedDaysAdvance > 0
       ? forcedDaysAdvance
       : calendarDaysBetween(tree.lastCalendarDate, todayStr);
 
-  if (calendarDiff > 0) {
-    for (let step = 0; step < Math.min(calendarDiff, 10); step++) {
+  if (treeDayDiff > 0) {
+    for (let step = 0; step < Math.min(treeDayDiff, 10); step++) {
       if (tree.status !== 'dead' && tree.status !== 'fruiting') {
         if (tree.wateringsToday < MAX_WATERINGS_PER_DAY) {
           tree.missedDays += 1;
@@ -424,7 +450,6 @@ export function advancePetAndTreeTime(
     tree.lastCalendarDate = todayStr;
   }
 
-  pet.level = computeLevelFromXp(pet.xp);
   pet.stage = computeGrowthStage(pet.level);
 
   return {

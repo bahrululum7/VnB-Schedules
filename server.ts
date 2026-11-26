@@ -31,7 +31,6 @@ import {
   advancePetAndTreeTime,
   clampStat,
   computeGrowthStage,
-  computeLevelFromXp,
   createInitialPetGameState,
   formatRemainingDuration,
   formatServerTodayISO,
@@ -837,15 +836,20 @@ app.get('/api/state', requireAuth, async (req, res) => {
   const clientToday = isValidDateStr(req.query.clientToday)
     ? req.query.clientToday
     : formatServerTodayISO();
+  const nowMs = Date.now();
   const currentPet = normalizePetGameState(workspaceState.petGame, clientToday);
-  const advanced = advancePetAndTreeTime(currentPet, clientToday, Date.now());
+  const advanced = advancePetAndTreeTime(currentPet, clientToday, nowMs);
+  const { nextGame: milestoneApplied } = applyPetMilestoneRewards(advanced, authUser.name, nowMs);
   if (
-    advanced.tree.lastCalendarDate !== currentPet.tree.lastCalendarDate ||
-    advanced.tree.status !== currentPet.tree.status ||
-    Math.abs(advanced.pet.energy - currentPet.pet.energy) >= 0.25 ||
-    Math.abs(advanced.pet.hunger - currentPet.pet.hunger) >= 0.25
+    milestoneApplied.tree.lastCalendarDate !== currentPet.tree.lastCalendarDate ||
+    milestoneApplied.tree.status !== currentPet.tree.status ||
+    milestoneApplied.pet.level !== currentPet.pet.level ||
+    milestoneApplied.pet.lastLevelCheckDate !== currentPet.pet.lastLevelCheckDate ||
+    milestoneApplied.pet.lastMilestoneLevelRewarded !== currentPet.pet.lastMilestoneLevelRewarded ||
+    Math.abs(milestoneApplied.pet.energy - currentPet.pet.energy) >= 0.25 ||
+    Math.abs(milestoneApplied.pet.hunger - currentPet.pet.hunger) >= 0.25
   ) {
-    workspaceState.petGame = advanced;
+    workspaceState.petGame = milestoneApplied;
     await persistState();
   }
   recalculatePresence();
@@ -1302,6 +1306,57 @@ app.post('/api/spinner/spin', requireAuth, async (req, res) => {
   res.json({ spinEvent, state: workspaceState });
 });
 
+function applyPetMilestoneRewards(
+  game: PetGameState,
+  actorName: string,
+  nowMs: number
+): {
+  nextGame: PetGameState;
+  milestoneTriggered: { level: number; rewardTitle: string } | null;
+} {
+  const reachedMilestone = Math.floor(game.pet.level / 10) * 10;
+  if (
+    reachedMilestone >= 10 &&
+    reachedMilestone > game.pet.lastMilestoneLevelRewarded &&
+    game.milestoneRewards.length > 0
+  ) {
+    const randomIdx = crypto.randomInt(0, game.milestoneRewards.length);
+    const picked = game.milestoneRewards[randomIdx];
+    const nextPet = {
+      ...game.pet,
+      lastMilestoneLevelRewarded: reachedMilestone,
+      stage: computeGrowthStage(game.pet.level),
+    };
+    const nextHistory = [
+      {
+        id: `ms-claim-${crypto.randomUUID()}`,
+        rewardId: picked.id,
+        rewardTitle: picked.title,
+        claimedBy: `${nextPet.name} Lv. ${reachedMilestone} (${actorName})`,
+        claimedAt: nowMs,
+        source: 'level_milestone' as const,
+        milestoneLevel: reachedMilestone,
+      },
+      ...game.claimedHistory,
+    ].slice(0, 60);
+
+    return {
+      nextGame: {
+        ...game,
+        pet: nextPet,
+        claimedHistory: nextHistory,
+        updatedAt: nowMs,
+      },
+      milestoneTriggered: {
+        level: reachedMilestone,
+        rewardTitle: picked.title,
+      },
+    };
+  }
+
+  return { nextGame: game, milestoneTriggered: null };
+}
+
 function requireAdmin(
   req: express.Request,
   res: express.Response,
@@ -1311,7 +1366,7 @@ function requireAdmin(
   const adminTokenHeader = req.headers['x-admin-token'];
   const adminToken = typeof adminTokenHeader === 'string' ? adminTokenHeader.trim() : '';
   if (!verifyAdminToken(adminToken, authUser.slot)) {
-    res.status(403).json({ error: 'Sesi Admin belum aktif atau kadaluarsa. Masukkan passcode Admin lagi.' });
+    res.status(403).json({ error: 'Sesi pengaturan belum aktif atau kadaluarsa. Masukkan passcode lagi.' });
     return;
   }
   next();
@@ -1321,7 +1376,7 @@ app.post('/api/admin/verify', requireAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
   const { passcode } = (req.body ?? {}) as { passcode?: unknown };
   if (typeof passcode !== 'string' || !verifyAdminPasscode(passcode)) {
-    res.status(401).json({ error: 'Passcode Admin salah. Coba cek lagi ya.' });
+    res.status(401).json({ error: 'Passcode salah. Coba cek lagi ya.' });
     return;
   }
   const adminToken = createAdminToken(authUser.slot);
@@ -1379,16 +1434,18 @@ app.put('/api/admin/rewards', requireAuth, requireAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/pet/simulate-day', requireAuth, requireAdmin, async (req, res) => {
+  const { authUser } = req as AuthedRequest;
   const { clientToday } = (req.body ?? {}) as { clientToday?: unknown };
   const todayStr = isValidDateStr(clientToday) ? clientToday : formatServerTodayISO();
+  const nowMs = Date.now();
   const currentPet = normalizePetGameState(workspaceState.petGame, todayStr);
-  const nextPet = advancePetAndTreeTime(currentPet, todayStr, Date.now(), 1);
-  // Shift lastWateredAt back so admin simulation can immediately test day 2/3 watering cleanly
-  nextPet.tree = { ...nextPet.tree, lastWateredAt: 0 };
-  workspaceState.petGame = nextPet;
+  const advanced = advancePetAndTreeTime(currentPet, todayStr, nowMs, 1);
+  advanced.tree = { ...advanced.tree, lastWateredAt: 0 };
+  const { nextGame, milestoneTriggered } = applyPetMilestoneRewards(advanced, authUser.name, nowMs);
+  workspaceState.petGame = nextGame;
   await persistState();
   recalculatePresence();
-  res.json({ ok: true, state: workspaceState });
+  res.json({ ok: true, milestoneTriggered, state: workspaceState });
 });
 
 app.post('/api/pet/action', requireAuth, async (req, res) => {
@@ -1723,39 +1780,9 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
     }
   }
 
-  pet.level = computeLevelFromXp(pet.xp);
   pet.stage = computeGrowthStage(pet.level);
 
-  // Automatic Random Milestone Reward at Level 10, 20, 30, ...
-  const reachedMilestone = Math.floor(pet.level / 10) * 10;
-  if (
-    reachedMilestone >= 10 &&
-    reachedMilestone > pet.lastMilestoneLevelRewarded &&
-    milestoneRewards.length > 0
-  ) {
-    const randomIdx = crypto.randomInt(0, milestoneRewards.length);
-    const picked = milestoneRewards[randomIdx];
-    pet.lastMilestoneLevelRewarded = reachedMilestone;
-    milestoneTriggered = {
-      level: reachedMilestone,
-      rewardTitle: picked.title,
-    };
-    claimedHistory = [
-      {
-        id: `ms-claim-${crypto.randomUUID()}`,
-        rewardId: picked.id,
-        rewardTitle: picked.title,
-        claimedBy: `${pet.name} Lv. ${reachedMilestone} (${authUser.name})`,
-        claimedAt: nowMs,
-        source: 'level_milestone' as const,
-        milestoneLevel: reachedMilestone,
-      },
-      ...claimedHistory,
-    ].slice(0, 60);
-    message = `${message} 🎉 Level ${reachedMilestone} tercapai! Dapat hadiah random: "${picked.title}"!`;
-  }
-
-  workspaceState.petGame = {
+  const preMilestoneGame: PetGameState = {
     pet,
     tree,
     inventory,
@@ -1764,6 +1791,17 @@ app.post('/api/pet/action', requireAuth, async (req, res) => {
     claimedHistory,
     updatedAt: nowMs,
   };
+  const { nextGame, milestoneTriggered: reachedMilestone } = applyPetMilestoneRewards(
+    preMilestoneGame,
+    authUser.name,
+    nowMs
+  );
+  if (reachedMilestone) {
+    milestoneTriggered = reachedMilestone;
+    message = `${message} 🎉 Level ${reachedMilestone.level} tercapai! Dapat hadiah random: "${reachedMilestone.rewardTitle}"!`;
+  }
+
+  workspaceState.petGame = nextGame;
 
   await persistState();
   recalculatePresence();

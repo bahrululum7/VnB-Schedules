@@ -752,12 +752,12 @@ export default function App() {
           error?: string;
         } | null;
         if (!res.ok || !data?.ok || !data.adminToken) {
-          return { ok: false, error: data?.error || 'Passcode Admin salah.' };
+          return { ok: false, error: data?.error || 'Passcode salah.' };
         }
         setAdminToken(data.adminToken);
         return { ok: true };
       } catch {
-        return { ok: false, error: 'Gagal memverifikasi passcode Admin.' };
+        return { ok: false, error: 'Gagal memverifikasi passcode.' };
       }
     },
     [apiFetch]
@@ -769,7 +769,7 @@ export default function App() {
       milestoneRewards: string[]
     ): Promise<{ ok: boolean; error?: string }> => {
       if (!adminToken) {
-        return { ok: false, error: 'Sesi Admin belum aktif.' };
+        return { ok: false, error: 'Sesi pengaturan belum aktif.' };
       }
       try {
         mutationEpochRef.current += 1;
@@ -805,7 +805,7 @@ export default function App() {
     error?: string;
   }> => {
     if (!adminToken) {
-      return { ok: false, error: 'Sesi Admin belum aktif.' };
+      return { ok: false, error: 'Sesi pengaturan belum aktif.' };
     }
     try {
       mutationEpochRef.current += 1;

@@ -77,6 +77,7 @@ export interface BearPetState {
   lastBathedAt: number;
   lastPlayedAt: number;
   sleepStartedAt: number;
+  lastLevelCheckDate: string; // YYYY-MM-DD for 1-day = +1 level check
   lastMilestoneLevelRewarded: number; // 0, 10, 20, 30...
 }
 

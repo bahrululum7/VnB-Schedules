@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CalendarPlus,
   Check,
@@ -48,17 +48,28 @@ export function AdminMenuPage({
   const [milestoneInputs, setMilestoneInputs] = useState<string[]>(() =>
     milestoneRewards.map((r) => r.title)
   );
+  const [isDirty, setIsDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [notice, setNotice] = useState<{ type: 'ok' | 'err'; text: string } | null>(null);
 
-  useEffect(() => {
-    setRewardInputs(rewards.map((r) => r.title));
-  }, [rewards]);
+  const serverSnapshot = useMemo(
+    () =>
+      JSON.stringify({
+        r: rewards.map((x) => x.title),
+        m: milestoneRewards.map((x) => x.title),
+      }),
+    [rewards, milestoneRewards]
+  );
+  const lastSyncedRef = useRef<string>(serverSnapshot);
 
   useEffect(() => {
-    setMilestoneInputs(milestoneRewards.map((r) => r.title));
-  }, [milestoneRewards]);
+    if (!isDirty && serverSnapshot !== lastSyncedRef.current) {
+      lastSyncedRef.current = serverSnapshot;
+      setRewardInputs(rewards.map((r) => r.title));
+      setMilestoneInputs(milestoneRewards.map((r) => r.title));
+    }
+  }, [isDirty, serverSnapshot, rewards, milestoneRewards]);
 
   const handleUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -77,15 +88,29 @@ export function AdminMenuPage({
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (saving) return;
+    const cleanRewards = rewardInputs.map((s) => s.trim());
+    const cleanMilestones = milestoneInputs.map((s) => s.trim()).filter(Boolean);
+    if (cleanRewards.some((t) => !t) || cleanRewards.length !== 3) {
+      setNotice({ type: 'err', text: 'Ketiga tulisan hadiah panen 1 kg wajib diisi.' });
+      return;
+    }
+    if (cleanMilestones.length < 1) {
+      setNotice({ type: 'err', text: 'Isi minimal 1 hadiah acak untuk level kelipatan 10.' });
+      return;
+    }
+
     setSaving(true);
     setNotice(null);
-    const cleanMilestones = milestoneInputs.map((s) => s.trim()).filter(Boolean);
-    const res = await onSaveRewards(rewardInputs, cleanMilestones);
+    const res = await onSaveRewards(cleanRewards, cleanMilestones);
     setSaving(false);
     if (res.ok) {
+      lastSyncedRef.current = JSON.stringify({ r: cleanRewards, m: cleanMilestones });
+      setRewardInputs(cleanRewards);
+      setMilestoneInputs(cleanMilestones);
+      setIsDirty(false);
       setNotice({
         type: 'ok',
-        text: 'Hadiah Toko NPC (3 pilihan) & Hadiah Random Level 10/20/30 berhasil disimpan.',
+        text: 'Hadiah Toko NPC (3 pilihan) & hadiah acak Level 10, 20, 30 berhasil disimpan.',
       });
     } else {
       setNotice({ type: 'err', text: res.error || 'Gagal menyimpan hadiah.' });
@@ -99,7 +124,7 @@ export function AdminMenuPage({
     const res = await onSimulateNextDay();
     setSimulating(false);
     if (res.ok) {
-      setNotice({ type: 'ok', text: `Siklus pohon kebun dimajukan +1 hari dari ${todayDate}.` });
+      setNotice({ type: 'ok', text: `Siklus hari kebun & beruang dimajukan +1 hari dari ${todayDate}.` });
     } else {
       setNotice({ type: 'err', text: res.error || 'Gagal memajukan hari simulasi.' });
     }
@@ -107,11 +132,13 @@ export function AdminMenuPage({
 
   const handleAddMilestoneField = () => {
     if (milestoneInputs.length >= 10) return;
+    setIsDirty(true);
     setMilestoneInputs((prev) => [...prev, '']);
   };
 
   const handleRemoveMilestoneField = (idx: number) => {
     if (milestoneInputs.length <= 1) return;
+    setIsDirty(true);
     setMilestoneInputs((prev) => prev.filter((_, i) => i !== idx));
   };
 
@@ -124,20 +151,20 @@ export function AdminMenuPage({
               <KeyRound className="w-6 h-6" />
             </div>
             <h1 className="font-display text-xl font-bold text-white pt-2">
-              Menu Khusus Admin
+              Pengaturan Hadiah Rahasia
             </h1>
             <p className="text-xs text-zinc-400">
-              Masukkan passcode admin untuk mengatur 3 hadiah panen Toko NPC & hadiah random Level 10, 20, 30.
+              Masukkan passcode untuk mengatur 3 hadiah panen Toko NPC & daftar hadiah acak Level 10, 20, 30.
             </p>
           </div>
 
           <form onSubmit={handleUnlock} className="space-y-4">
             <div className="space-y-1.5">
-              <label htmlFor="admin-passcode" className="block text-xs font-medium text-zinc-300">
-                Passcode Admin
+              <label htmlFor="passcode-input" className="block text-xs font-medium text-zinc-300">
+                Passcode
               </label>
               <input
-                id="admin-passcode"
+                id="passcode-input"
                 type="password"
                 inputMode="numeric"
                 autoComplete="off"
@@ -160,7 +187,7 @@ export function AdminMenuPage({
               disabled={verifying}
               className="w-full min-h-[44px] px-4 py-2.5 rounded-xl bg-pink-500 hover:bg-pink-400 disabled:opacity-60 text-zinc-950 text-xs font-bold transition-colors cursor-pointer"
             >
-              {verifying ? 'Memeriksa Passcode...' : 'Buka Menu Admin'}
+              {verifying ? 'Memeriksa Passcode...' : 'Buka Pengaturan'}
             </button>
           </form>
         </section>
@@ -174,13 +201,13 @@ export function AdminMenuPage({
         <div>
           <div className="flex items-center gap-2 text-xs font-medium text-emerald-300">
             <ShieldCheck className="w-4 h-4" />
-            <span>Akses Admin Terverifikasi</span>
+            <span>Akses Pengaturan Terbuka</span>
           </div>
           <h1 className="font-display text-2xl font-bold text-white mt-1">
             Pengaturan Hadiah Panen & Level Beruang
           </h1>
           <p className="text-xs sm:text-sm text-zinc-400 mt-1">
-            Atur 3 hadiah tukar panen 1 kg di Toko NPC sekaligus daftar hadiah random saat beruang mencapai Level 10, 20, 30, dst.
+            Atur 3 hadiah tukar panen 1 kg di Toko NPC sekaligus daftar hadiah acak saat beruang mencapai Level 10, 20, 30, dst.
           </p>
         </div>
 
@@ -190,7 +217,7 @@ export function AdminMenuPage({
           className="min-h-[42px] px-4 py-2 rounded-xl bg-[#1D1D27] hover:bg-rose-500/15 border border-white/10 hover:border-rose-400/40 text-xs font-semibold text-zinc-200 hover:text-rose-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0"
         >
           <Lock className="w-4 h-4" />
-          <span>Kunci Menu Admin</span>
+          <span>Kunci Pengaturan</span>
         </button>
       </section>
 
@@ -232,9 +259,11 @@ export function AdminMenuPage({
                     type="text"
                     maxLength={120}
                     value={rewardInputs[idx] ?? ''}
-                    onChange={(e) =>
-                      setRewardInputs((prev) => prev.map((v, i) => (i === idx ? e.target.value : v)))
-                    }
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setIsDirty(true);
+                      setRewardInputs((prev) => prev.map((v, i) => (i === idx ? val : v)));
+                    }}
                     placeholder={`Contoh hadiah panen ${idx + 1}`}
                     className="w-full px-4 py-2.5 rounded-xl bg-[#0B0B0F] border border-white/15 focus:border-pink-400 text-white text-sm focus:outline-none"
                     required
@@ -249,7 +278,7 @@ export function AdminMenuPage({
                 <div className="flex items-center gap-2">
                   <Trophy className="w-4 h-4 text-amber-400" />
                   <h2 className="font-display text-base sm:text-lg font-bold text-white">
-                    2. Hadiah Random Level 10, 20, 30...
+                    2. Hadiah Acak Level 10, 20, 30...
                   </h2>
                 </div>
                 {milestoneInputs.length < 10 && (
@@ -274,12 +303,14 @@ export function AdminMenuPage({
                       type="text"
                       maxLength={120}
                       value={val}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const nextVal = e.target.value;
+                        setIsDirty(true);
                         setMilestoneInputs((prev) =>
-                          prev.map((v, i) => (i === idx ? e.target.value : v))
-                        )
-                      }
-                      placeholder={`Opsi hadiah random level ${idx + 1}`}
+                          prev.map((v, i) => (i === idx ? nextVal : v))
+                        );
+                      }}
+                      placeholder={`Opsi hadiah level ${idx + 1}`}
                       className="flex-1 px-4 py-2.5 rounded-xl bg-[#0B0B0F] border border-white/15 focus:border-amber-400 text-white text-sm focus:outline-none"
                       required
                     />
@@ -287,7 +318,7 @@ export function AdminMenuPage({
                       <button
                         type="button"
                         onClick={() => handleRemoveMilestoneField(idx)}
-                        aria-label={`Hapus opsi hadiah random ${idx + 1}`}
+                        aria-label={`Hapus opsi hadiah ${idx + 1}`}
                         className="min-h-[42px] min-w-[42px] rounded-xl bg-[#1D1D27] hover:bg-rose-500/15 border border-white/10 text-zinc-400 hover:text-rose-300 flex items-center justify-center cursor-pointer"
                       >
                         <Trash2 className="w-4 h-4" />
@@ -305,7 +336,7 @@ export function AdminMenuPage({
                 className="min-h-[44px] px-5 py-2.5 rounded-xl bg-pink-500 hover:bg-pink-400 disabled:opacity-60 text-zinc-950 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <Check className="w-4 h-4" />
-                <span>{saving ? 'Menyimpan...' : 'Simpan Semua Pengaturan Hadiah'}</span>
+                <span>{saving ? 'Menyimpan...' : 'Simpan Semua Hadiah'}</span>
               </button>
 
               <button
@@ -315,7 +346,7 @@ export function AdminMenuPage({
                 className="min-h-[44px] px-4 py-2.5 rounded-xl bg-[#1D1D27] hover:bg-white/10 border border-white/10 text-xs font-semibold text-zinc-200 inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <CalendarPlus className="w-4 h-4 text-sky-400" />
-                <span>{simulating ? 'Memproses...' : 'Uji Ganti Hari Pohon (+1 Hari)'}</span>
+                <span>{simulating ? 'Memproses...' : 'Uji Ganti Hari (+1 Hari)'}</span>
               </button>
             </div>
           </form>

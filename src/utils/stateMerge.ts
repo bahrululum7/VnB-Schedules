@@ -31,6 +31,7 @@ export function loadCachedWorkspace(): SharedWorkspaceState | null {
         ? parsed.spinnerOptions
         : [],
       lastSpin: parsed.lastSpin ?? null,
+      petGame: parsed.petGame,
     };
   } catch {
     return null;
@@ -136,6 +137,11 @@ export function mergeWorkspaceStates(
       ? serverState.lastSpin
       : localState.lastSpin;
 
+  const petGame =
+    (serverState.petGame?.updatedAt ?? 0) >= (localState.petGame?.updatedAt ?? 0)
+      ? (serverState.petGame ?? localState.petGame)
+      : (localState.petGame ?? serverState.petGame);
+
   return {
     revision: Math.max(localState.revision ?? 0, serverState.revision ?? 0),
     partners: {
@@ -165,6 +171,7 @@ export function mergeWorkspaceStates(
         ? Array.from(spinOptMap.values())
         : serverState.spinnerOptions,
     lastSpin,
+    petGame,
   };
 }
 

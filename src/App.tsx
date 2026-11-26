@@ -5,8 +5,9 @@ import {
   CheckCircle2,
   Clock,
   LogOut,
+  PawPrint,
   Plus,
-  Shirt,
+  ShieldCheck,
   UserCheck,
   Volume2,
   VolumeX,
@@ -14,6 +15,7 @@ import {
 import type {
   ActivityCategory,
   AuthenticatedUser,
+  BearSnackId,
   DayKey,
   EditableDayKey,
   FreeSlot,
@@ -36,6 +38,7 @@ import {
   mergeWorkspaceStates,
   saveCachedWorkspace,
 } from './utils/stateMerge';
+import { createInitialPetGameState } from './utils/petGameEngine';
 import { LoginGate } from './components/LoginGate';
 import { CoupleIllustration } from './components/CoupleIllustration';
 import { ScheduleTable24h } from './components/ScheduleTable24h';
@@ -45,9 +48,10 @@ import {
   ExplosionAlarmModal,
   type ActiveAlarmPayload,
 } from './components/ExplosionAlarmModal';
-import { OutfitGamePage } from './components/OutfitGamePage';
+import { BearPetGamePage } from './components/BearPetGamePage';
+import { AdminMenuPage } from './components/AdminMenuPage';
 
-type ActivePage = 'schedule' | 'outfit';
+type ActivePage = 'schedule' | 'pet' | 'admin';
 
 function formatClockHM(date: Date): string {
   return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
@@ -73,6 +77,7 @@ export default function App() {
   const [checkingSession, setCheckingSession] = useState(true);
 
   const [activePage, setActivePage] = useState<ActivePage>('schedule');
+  const [adminToken, setAdminToken] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<DayKey>('continuous');
   const [modalOpen, setModalOpen] = useState(false);
   const [modalInitial, setModalInitial] = useState<AddScheduleInitial | null>(null);
@@ -100,6 +105,8 @@ export default function App() {
 
   // Live calendar dates derived directly from the live clock so rollover happens automatically at 00:00:00
   const todayDate = formatLocalDateISO(nowTime);
+  const todayDateRef = useRef(todayDate);
+  todayDateRef.current = todayDate;
   const yesterdayDate = formatLocalDateISO(addDaysToDate(nowTime, -1));
   const tomorrowDate = formatLocalDateISO(addDaysToDate(nowTime, 1));
 
@@ -296,11 +303,14 @@ export default function App() {
         if (token !== 'cookie-session') {
           headers.Authorization = `Bearer ${token}`;
         }
-        const res = await fetch(`/api/state?_ts=${Date.now()}`, {
-          credentials: 'same-origin',
-          cache: 'no-store',
-          headers,
-        });
+        const res = await fetch(
+          `/api/state?_ts=${Date.now()}&clientToday=${encodeURIComponent(todayDateRef.current)}`,
+          {
+            credentials: 'same-origin',
+            cache: 'no-store',
+            headers,
+          }
+        );
         if (disposed) return;
         if (res.status === 401) {
           setToken(null);
@@ -474,6 +484,7 @@ export default function App() {
     latestRevisionRef.current = 0;
     mutationEpochRef.current = 0;
     workspaceRef.current = null;
+    setAdminToken(null);
     setToken(null);
     setCurrentUser(null);
     setWorkspace(null);
@@ -685,6 +696,131 @@ export default function App() {
     });
   };
 
+  const handlePetAction = useCallback(
+    async (payload: {
+      action: string;
+      snackId?: BearSnackId;
+      rewardId?: string;
+      name?: string;
+    }): Promise<{ ok: boolean; message?: string; error?: string }> => {
+      try {
+        mutationEpochRef.current += 1;
+        const res = await apiFetch('/api/pet/action', {
+          method: 'POST',
+          body: JSON.stringify({ ...payload, clientToday: todayDateRef.current }),
+        });
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          message?: string;
+          error?: string;
+          state?: SharedWorkspaceState;
+        } | null;
+        if (!res.ok || !data?.ok) {
+          return { ok: false, error: data?.error || 'Aksi beruang gagal dilakukan.' };
+        }
+        if (data.state) {
+          applyServerState(data.state, { isMutation: true });
+        }
+        return { ok: true, message: data.message };
+      } catch {
+        return { ok: false, error: 'Koneksi ke server bermasalah.' };
+      }
+    },
+    [apiFetch, applyServerState]
+  );
+
+  const handleAdminVerify = useCallback(
+    async (passcode: string): Promise<{ ok: boolean; error?: string }> => {
+      try {
+        const res = await apiFetch('/api/admin/verify', {
+          method: 'POST',
+          body: JSON.stringify({ passcode }),
+        });
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          adminToken?: string;
+          error?: string;
+        } | null;
+        if (!res.ok || !data?.ok || !data.adminToken) {
+          return { ok: false, error: data?.error || 'Passcode Admin salah.' };
+        }
+        setAdminToken(data.adminToken);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Gagal memverifikasi passcode Admin.' };
+      }
+    },
+    [apiFetch]
+  );
+
+  const handleAdminSaveRewards = useCallback(
+    async (titles: string[]): Promise<{ ok: boolean; error?: string }> => {
+      if (!adminToken) {
+        return { ok: false, error: 'Sesi Admin belum aktif.' };
+      }
+      try {
+        mutationEpochRef.current += 1;
+        const res = await apiFetch('/api/admin/rewards', {
+          method: 'PUT',
+          headers: { 'X-Admin-Token': adminToken },
+          body: JSON.stringify({ rewards: titles }),
+        });
+        if (res.status === 403) {
+          setAdminToken(null);
+        }
+        const data = (await res.json().catch(() => null)) as {
+          ok?: boolean;
+          error?: string;
+          state?: SharedWorkspaceState;
+        } | null;
+        if (!res.ok || !data?.ok) {
+          return { ok: false, error: data?.error || 'Gagal menyimpan pilihan hadiah.' };
+        }
+        if (data.state) {
+          applyServerState(data.state, { isMutation: true });
+        }
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Koneksi ke server bermasalah.' };
+      }
+    },
+    [adminToken, apiFetch, applyServerState]
+  );
+
+  const handleAdminSimulateDay = useCallback(async (): Promise<{
+    ok: boolean;
+    error?: string;
+  }> => {
+    if (!adminToken) {
+      return { ok: false, error: 'Sesi Admin belum aktif.' };
+    }
+    try {
+      mutationEpochRef.current += 1;
+      const res = await apiFetch('/api/admin/pet/simulate-day', {
+        method: 'POST',
+        headers: { 'X-Admin-Token': adminToken },
+        body: JSON.stringify({ clientToday: todayDateRef.current }),
+      });
+      if (res.status === 403) {
+        setAdminToken(null);
+      }
+      const data = (await res.json().catch(() => null)) as {
+        ok?: boolean;
+        error?: string;
+        state?: SharedWorkspaceState;
+      } | null;
+      if (!res.ok || !data?.ok) {
+        return { ok: false, error: data?.error || 'Gagal memajukan hari simulasi.' };
+      }
+      if (data.state) {
+        applyServerState(data.state, { isMutation: true });
+      }
+      return { ok: true };
+    } catch {
+      return { ok: false, error: 'Koneksi ke server bermasalah.' };
+    }
+  }, [adminToken, apiFetch, applyServerState]);
+
   const handleTestAlarm = () => {
     if (!workspace || !currentUser) return;
     const todayItems = workspace.schedules.filter((s) => s.date === todayDate);
@@ -810,18 +946,28 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setActivePage('outfit')}
+              onClick={() => setActivePage('pet')}
               className={`hover:text-pink-300 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer ${
-                activePage === 'outfit' ? 'text-pink-300 font-semibold' : ''
+                activePage === 'pet' ? 'text-pink-300 font-semibold' : ''
               }`}
             >
-              <Shirt className="w-3.5 h-3.5" />
-              <span>Outfit Game</span>
+              <PawPrint className="w-3.5 h-3.5" />
+              <span>Game Beruang</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActivePage('admin')}
+              className={`hover:text-pink-300 transition-colors whitespace-nowrap shrink-0 inline-flex items-center gap-1.5 cursor-pointer ${
+                activePage === 'admin' ? 'text-pink-300 font-semibold' : ''
+              }`}
+            >
+              <ShieldCheck className="w-3.5 h-3.5" />
+              <span>Admin</span>
             </button>
           </nav>
 
           <div className="shrink-0">
-            {activePage === 'outfit' ? (
+            {activePage !== 'schedule' ? (
               <button
                 type="button"
                 onClick={() => setActivePage('schedule')}
@@ -858,7 +1004,7 @@ export default function App() {
 
       <main id="top" className="max-w-7xl mx-auto px-4 sm:px-6 py-7 space-y-8">
         {/* Compact Mobile Page Switcher */}
-        <div className="flex md:hidden items-center justify-between gap-2 p-1 rounded-xl bg-[#14141B] border border-white/10">
+        <div className="flex md:hidden items-center justify-between gap-1.5 p-1 rounded-xl bg-[#14141B] border border-white/10">
           <button
             type="button"
             onClick={() => setActivePage('schedule')}
@@ -872,23 +1018,48 @@ export default function App() {
           </button>
           <button
             type="button"
-            onClick={() => setActivePage('outfit')}
-            className={`flex-1 min-h-[38px] rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1.5 transition-colors cursor-pointer ${
-              activePage === 'outfit'
+            onClick={() => setActivePage('pet')}
+            className={`flex-1 min-h-[38px] rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+              activePage === 'pet'
                 ? 'bg-pink-500 text-zinc-950'
                 : 'text-zinc-300'
             }`}
           >
-            <Shirt className="w-3.5 h-3.5" />
-            <span>Outfit Game</span>
+            <PawPrint className="w-3.5 h-3.5" />
+            <span>Beruang</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActivePage('admin')}
+            className={`flex-1 min-h-[38px] rounded-lg text-xs font-semibold inline-flex items-center justify-center gap-1 transition-colors cursor-pointer ${
+              activePage === 'admin'
+                ? 'bg-pink-500 text-zinc-950'
+                : 'text-zinc-300'
+            }`}
+          >
+            <ShieldCheck className="w-3.5 h-3.5" />
+            <span>Admin</span>
           </button>
         </div>
 
-        {activePage === 'outfit' ? (
-          <OutfitGamePage
-            partner1Name={partner1.name}
-            partner2Name={partner2.name}
+        {activePage === 'pet' ? (
+          <BearPetGamePage
+            game={workspace.petGame ?? createInitialPetGameState(todayDate)}
+            todayDate={todayDate}
+            currentUserName={currentUser.name}
             soundEnabled={soundEnabled}
+            onAction={handlePetAction}
+          />
+        ) : activePage === 'admin' ? (
+          <AdminMenuPage
+            rewards={(workspace.petGame ?? createInitialPetGameState(todayDate)).rewards}
+            claimedHistory={(workspace.petGame ?? createInitialPetGameState(todayDate)).claimedHistory}
+            todayDate={todayDate}
+            adminToken={adminToken}
+            onVerifyPasscode={handleAdminVerify}
+            onSaveRewards={handleAdminSaveRewards}
+            onSimulateNextDay={handleAdminSimulateDay}
+            onLockAdmin={() => setAdminToken(null)}
           />
         ) : (
           <>

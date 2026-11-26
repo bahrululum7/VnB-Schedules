@@ -7,15 +7,28 @@ import path from 'path';
 import type {
   ActivityCategory,
   AuthenticatedUser,
+  BearSnackId,
   DayConfirmationState,
   DayConfirmationTimestamps,
   PartnerRole,
   PartnerSlot,
+  PetGameState,
   ScheduleItem,
   ScheduleOwner,
   SharedWorkspaceState,
   SpinnerOption,
 } from './src/types.ts';
+import {
+  FRUIT_SELL_COINS,
+  MAX_FRUIT_GRAMS,
+  SNACK_CATALOG,
+  advancePetAndTreeTime,
+  clampStat,
+  computeGrowthStage,
+  createInitialPetGameState,
+  formatServerTodayISO,
+  normalizePetGameState,
+} from './src/utils/petGameEngine.ts';
 
 const PORT = Number(process.env.PORT) || 3000;
 const STATE_FILE = path.join(os.tmpdir(), 'vnb-schedules-state-v3.json');
@@ -25,6 +38,11 @@ const KV_KEY = 'vnb_schedules_workspace_v3';
 const PASSCODE_SALT = 'vnb_couple_salt_v1';
 const DEFAULT_PASSCODE_SCRYPT_HEX =
   '59c66b193fe0dfe4240de2e0df51671051065edde5f208e84b3b6af1fd69ae52192ccfa1f6b4f27b3db345b7d6e5342f1901f10b70c22d3a3f0b15f0fb3f274b';
+
+// Salted scrypt verifier for the Admin reward menu passcode.
+const ADMIN_PASSCODE_SALT = 'vnb_admin_salt_v1';
+const ADMIN_PASSCODE_SCRYPT_HEX =
+  'f8f8760d67de427eed8e9191d92ece6472a7fe3c64be21d246768e856e89624afbf99fc811dea18cf3ee3763e11ee298072bfb388091e23b16041222c52e30a9';
 
 // Deterministic fallback secret so tokens & cookies stay valid across Vercel serverless containers
 const DERIVED_FALLBACK_SECRET = crypto
@@ -111,6 +129,72 @@ function verifyPasscode(input: string): boolean {
   return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
 }
 
+function verifyAdminPasscode(input: string): boolean {
+  if (typeof input !== 'string' || input.length === 0 || input.length > 128) {
+    return false;
+  }
+  const normalized = input.trim();
+  const envAdmin = process.env.ADMIN_PASSCODE?.trim();
+
+  if (envAdmin && envAdmin.length > 0) {
+    const inputHash = crypto.createHash('sha256').update(normalized).digest();
+    const expectedHash = crypto.createHash('sha256').update(envAdmin).digest();
+    return crypto.timingSafeEqual(inputHash, expectedHash);
+  }
+
+  const derived = crypto.scryptSync(normalized, ADMIN_PASSCODE_SALT, 64);
+  const expected = Buffer.from(ADMIN_PASSCODE_SCRYPT_HEX, 'hex');
+  return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
+}
+
+function createAdminToken(slot: PartnerSlot): string {
+  const payload = {
+    scope: 'vnb-admin',
+    slot,
+    exp: Date.now() + 1000 * 60 * 60 * 12,
+    jti: crypto.randomUUID(),
+  };
+  const encoded = Buffer.from(JSON.stringify(payload), 'utf-8').toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', getSessionSecret())
+    .update(encoded)
+    .digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifyAdminToken(token: string, expectedSlot: PartnerSlot): boolean {
+  if (!token) return false;
+  const parts = token.split('.');
+  if (parts.length !== 2) return false;
+  const [encoded, sig] = parts;
+  if (!encoded || !sig) return false;
+
+  const expectedSig = crypto
+    .createHmac('sha256', getSessionSecret())
+    .update(encoded)
+    .digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    return false;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf-8')) as {
+      scope?: string;
+      slot?: string;
+      exp?: number;
+    };
+    return (
+      parsed.scope === 'vnb-admin' &&
+      parsed.slot === expectedSlot &&
+      typeof parsed.exp === 'number' &&
+      Date.now() <= parsed.exp
+    );
+  } catch {
+    return false;
+  }
+}
+
 const DEFAULT_SPINNER_OPTIONS: SpinnerOption[] = [
   { id: 'spin-1', label: 'Nonton Film Bareng', addedBy: 'VnB' },
   { id: 'spin-2', label: 'Makan Malam via VC', addedBy: 'VnB' },
@@ -143,6 +227,7 @@ function createInitialState(): SharedWorkspaceState {
     confirmedUpdatedAt: {},
     spinnerOptions: [...DEFAULT_SPINNER_OPTIONS],
     lastSpin: null,
+    petGame: createInitialPetGameState(),
   };
 }
 
@@ -223,6 +308,7 @@ function normalizeState(parsed: Partial<SharedWorkspaceState>): SharedWorkspaceS
         ? parsed.spinnerOptions
         : [...DEFAULT_SPINNER_OPTIONS],
     lastSpin: parsed.lastSpin ?? null,
+    petGame: normalizePetGameState(parsed.petGame),
   };
 }
 
@@ -347,6 +433,11 @@ function mergeTwoStates(
     spinOptMap.set(opt.id, opt);
   }
 
+  const primaryPetGame =
+    (b.petGame?.updatedAt ?? 0) >= (a.petGame?.updatedAt ?? 0)
+      ? normalizePetGameState(b.petGame ?? a.petGame)
+      : normalizePetGameState(a.petGame ?? b.petGame);
+
   return {
     revision: Math.max(a.revision ?? 0, b.revision ?? 0),
     partners: {
@@ -372,6 +463,7 @@ function mergeTwoStates(
         ? Array.from(spinOptMap.values())
         : [...DEFAULT_SPINNER_OPTIONS],
     lastSpin: primarySpin,
+    petGame: primaryPetGame,
   };
 }
 
@@ -729,10 +821,24 @@ app.post('/api/auth/logout', requireAuth, (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/state', requireAuth, (req, res) => {
+app.get('/api/state', requireAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
   if (workspaceState.partners[authUser.slot].name.startsWith('Pasangan ')) {
     workspaceState.partners[authUser.slot].name = authUser.name;
+  }
+  const clientToday = isValidDateStr(req.query.clientToday)
+    ? req.query.clientToday
+    : formatServerTodayISO();
+  const currentPet = normalizePetGameState(workspaceState.petGame, clientToday);
+  const advanced = advancePetAndTreeTime(currentPet, clientToday, Date.now());
+  if (
+    advanced.tree.lastCalendarDate !== currentPet.tree.lastCalendarDate ||
+    advanced.tree.status !== currentPet.tree.status ||
+    advanced.pet.energy !== currentPet.pet.energy ||
+    advanced.pet.hunger !== currentPet.pet.hunger
+  ) {
+    workspaceState.petGame = advanced;
+    await persistState();
   }
   recalculatePresence();
   res.json({ state: workspaceState });
@@ -1186,6 +1292,380 @@ app.post('/api/spinner/spin', requireAuth, async (req, res) => {
   await persistState();
   recalculatePresence();
   res.json({ spinEvent, state: workspaceState });
+});
+
+function requireAdmin(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+): void {
+  const { authUser } = req as AuthedRequest;
+  const adminTokenHeader = req.headers['x-admin-token'];
+  const adminToken = typeof adminTokenHeader === 'string' ? adminTokenHeader.trim() : '';
+  if (!verifyAdminToken(adminToken, authUser.slot)) {
+    res.status(403).json({ error: 'Sesi Admin belum aktif atau kadaluarsa. Masukkan passcode Admin lagi.' });
+    return;
+  }
+  next();
+}
+
+app.post('/api/admin/verify', requireAuth, (req, res) => {
+  const { authUser } = req as AuthedRequest;
+  const { passcode } = (req.body ?? {}) as { passcode?: unknown };
+  if (typeof passcode !== 'string' || !verifyAdminPasscode(passcode)) {
+    res.status(401).json({ error: 'Passcode Admin salah. Coba cek lagi ya.' });
+    return;
+  }
+  const adminToken = createAdminToken(authUser.slot);
+  res.json({ ok: true, adminToken });
+});
+
+app.put('/api/admin/rewards', requireAuth, requireAdmin, async (req, res) => {
+  const { rewards } = (req.body ?? {}) as { rewards?: unknown };
+  if (!Array.isArray(rewards) || rewards.length !== 3) {
+    res.status(400).json({ error: 'Harus mengisi tepat 3 pilihan hadiah.' });
+    return;
+  }
+  const sanitized: Array<{ id: string; title: string }> = [];
+  for (let i = 0; i < 3; i++) {
+    const rawTitle = rewards[i];
+    if (typeof rawTitle !== 'string' || rawTitle.trim().length < 1 || rawTitle.trim().length > 120) {
+      res.status(400).json({ error: `Hadiah ${i + 1} wajib diisi (maks 120 karakter).` });
+      return;
+    }
+    sanitized.push({ id: `reward-${i + 1}`, title: rawTitle.trim() });
+  }
+
+  const currentPet = normalizePetGameState(workspaceState.petGame);
+  workspaceState.petGame = {
+    ...currentPet,
+    rewards: sanitized,
+    updatedAt: Date.now(),
+  };
+  await persistState();
+  recalculatePresence();
+  res.json({ ok: true, state: workspaceState });
+});
+
+app.post('/api/admin/pet/simulate-day', requireAuth, requireAdmin, async (req, res) => {
+  const { clientToday } = (req.body ?? {}) as { clientToday?: unknown };
+  const todayStr = isValidDateStr(clientToday) ? clientToday : formatServerTodayISO();
+  const currentPet = normalizePetGameState(workspaceState.petGame, todayStr);
+  const nextPet = advancePetAndTreeTime(currentPet, todayStr, Date.now(), 1);
+  workspaceState.petGame = nextPet;
+  await persistState();
+  recalculatePresence();
+  res.json({ ok: true, state: workspaceState });
+});
+
+app.post('/api/pet/action', requireAuth, async (req, res) => {
+  const { authUser } = req as AuthedRequest;
+  const { action, clientToday, snackId, rewardId, name } = (req.body ?? {}) as {
+    action?: unknown;
+    clientToday?: unknown;
+    snackId?: unknown;
+    rewardId?: unknown;
+    name?: unknown;
+  };
+
+  if (typeof action !== 'string') {
+    res.status(400).json({ error: 'Aksi game tidak valid.' });
+    return;
+  }
+
+  const todayStr = isValidDateStr(clientToday) ? clientToday : formatServerTodayISO();
+  const nowMs = Date.now();
+  const baseGame = normalizePetGameState(workspaceState.petGame, todayStr);
+  const game: PetGameState = advancePetAndTreeTime(baseGame, todayStr, nowMs);
+  const pet = { ...game.pet };
+  const tree = { ...game.tree };
+  const inventory = {
+    ...game.inventory,
+    snacks: { ...game.inventory.snacks },
+  };
+  let rewards = [...game.rewards];
+  let claimedHistory = [...game.claimedHistory];
+  let message = '';
+
+  switch (action) {
+    case 'rename': {
+      if (typeof name !== 'string' || name.trim().length < 1 || name.trim().length > 24) {
+        res.status(400).json({ error: 'Nama beruang harus 1–24 huruf.' });
+        return;
+      }
+      pet.name = name.trim();
+      message = `Nama beruang diganti menjadi ${pet.name}.`;
+      break;
+    }
+
+    case 'sleep_toggle': {
+      if (pet.isSleeping) {
+        pet.isSleeping = false;
+        pet.isExhausted = pet.energy <= 20;
+        message = `${pet.name} bangun dari tidurnya!`;
+      } else {
+        pet.isSleeping = true;
+        pet.isExhausted = false;
+        message = `${pet.name} mulai tidur nyenyak untuk memulihkan energi.`;
+      }
+      pet.lastUpdatedAt = nowMs;
+      break;
+    }
+
+    case 'sleep_tick': {
+      if (pet.isSleeping) {
+        pet.energy = clampStat(pet.energy + 12);
+        pet.lastUpdatedAt = nowMs;
+        if (pet.energy >= 100) {
+          pet.isSleeping = false;
+          pet.isExhausted = false;
+          pet.xp += 15;
+          pet.happiness = clampStat(pet.happiness + 10);
+          message = `${pet.name} bangun segar dengan energi penuh! (+15 XP)`;
+        } else {
+          message = `${pet.name} sedang tidur nyenyak...`;
+        }
+      }
+      break;
+    }
+
+    case 'feed': {
+      if (pet.isSleeping) {
+        res.status(400).json({ error: `${pet.name} sedang tidur. Bangunkan dulu sebelum makan.` });
+        return;
+      }
+      const snack = SNACK_CATALOG.find((s) => s.id === snackId) ?? SNACK_CATALOG[0];
+      if (snack.id !== 'berry') {
+        const count = inventory.snacks[snack.id] ?? 0;
+        if (count <= 0) {
+          res.status(400).json({ error: `Stok ${snack.name} habis! Beli di Toko NPC dulu.` });
+          return;
+        }
+        inventory.snacks[snack.id] = count - 1;
+      }
+      pet.hunger = clampStat(pet.hunger + snack.hungerGain);
+      pet.happiness = clampStat(pet.happiness + snack.happinessGain);
+      pet.energy = clampStat(pet.energy + snack.energyGain);
+      if (pet.energy > 25) pet.isExhausted = false;
+      pet.xp += 10;
+      pet.lastUpdatedAt = nowMs;
+      message = `${pet.name} lahap makan ${snack.name}! (+10 XP)`;
+      break;
+    }
+
+    case 'bath': {
+      if (pet.isSleeping) {
+        res.status(400).json({ error: `${pet.name} sedang tidur. Bangunkan dulu untuk mandi.` });
+        return;
+      }
+      pet.hygiene = 100;
+      pet.happiness = clampStat(pet.happiness + 12);
+      pet.xp += 10;
+      pet.lastUpdatedAt = nowMs;
+      message = `${pet.name} mandi busa wangi dan bersih berkilau! (+10 XP)`;
+      break;
+    }
+
+    case 'play': {
+      if (pet.isSleeping) {
+        res.status(400).json({ error: `${pet.name} sedang tidur. Bangunkan dulu kalau mau bermain.` });
+        return;
+      }
+      if (pet.isExhausted || pet.energy <= 20) {
+        pet.isExhausted = true;
+        workspaceState.petGame = { ...game, pet, updatedAt: nowMs };
+        await persistState();
+        res.status(400).json({ error: `${pet.name} kelelahan! Tidurkan dulu agar energinya pulih.` });
+        return;
+      }
+      pet.happiness = clampStat(pet.happiness + 22);
+      pet.energy = clampStat(pet.energy - 16);
+      pet.hunger = clampStat(pet.hunger - 8);
+      pet.hygiene = clampStat(pet.hygiene - 10);
+      pet.xp += 12;
+      if (pet.energy <= 20) pet.isExhausted = true;
+      pet.lastUpdatedAt = nowMs;
+      message = pet.isExhausted
+        ? `${pet.name} senang bermain tapi sekarang mulai kelelahan! Waktunya tidur.`
+        : `${pet.name} senang bermain bersama! (+12 XP)`;
+      break;
+    }
+
+    case 'water_tree': {
+      if (pet.isSleeping) {
+        res.status(400).json({ error: `${pet.name} sedang tidur. Bangunkan dulu untuk menyiram pohon.` });
+        return;
+      }
+      if (pet.isExhausted || pet.energy <= 15) {
+        pet.isExhausted = true;
+        workspaceState.petGame = { ...game, pet, updatedAt: nowMs };
+        await persistState();
+        res.status(400).json({ error: `${pet.name} kelelahan! Tidurkan dulu sebelum menyiram tanaman.` });
+        return;
+      }
+      if (tree.status === 'dead') {
+        res.status(400).json({ error: 'Pohon sudah mati karena lupa disiram 2x dalam 3 hari. Tanam bibit baru dulu ya.' });
+        return;
+      }
+      if (tree.status === 'fruiting') {
+        res.status(400).json({ error: 'Pohon sudah berbuah lebat! Panen buahnya dulu ya.' });
+        return;
+      }
+      if (tree.wateringsToday >= 3) {
+        res.status(400).json({ error: 'Pohon sudah disiram 3x hari ini! Lanjutkan besok ya.' });
+        return;
+      }
+
+      tree.wateringsToday += 1;
+      tree.lastWateredAt = nowMs;
+      if (tree.wateringsToday >= 3 && tree.missedDays === 1) {
+        // Recover visually once fully watered today, while keeping missedDays count for the 3-day rule
+        tree.status = 'growing';
+      }
+      if (tree.cycleDay >= 3 && tree.wateringsToday >= 3 && tree.missedDays < 2) {
+        tree.status = 'fruiting';
+      }
+
+      pet.energy = clampStat(pet.energy - 14);
+      pet.hygiene = clampStat(pet.hygiene - 7);
+      pet.happiness = clampStat(pet.happiness + 8);
+      pet.xp += 15;
+      if (pet.energy <= 20) pet.isExhausted = true;
+      pet.lastUpdatedAt = nowMs;
+
+      message =
+        tree.status === 'fruiting'
+          ? `Hore! Pohon indah ${pet.name} berbuah lebat setelah dirawat 3 hari! (+15 XP)`
+          : `Berhasil menyiram pohon (${tree.wateringsToday}/3 hari ini). (+15 XP)`;
+      break;
+    }
+
+    case 'harvest_tree': {
+      if (tree.status !== 'fruiting') {
+        res.status(400).json({ error: 'Pohon belum berbuah. Rawat dan siram 3x sehari selama 3 hari ya.' });
+        return;
+      }
+      if (inventory.fruitGrams >= MAX_FRUIT_GRAMS) {
+        res.status(400).json({ error: 'Inventory sudah penuh 1 kg (1.000 g)! Jual buahnya ke Toko NPC dulu ya.' });
+        return;
+      }
+
+      const yieldGrams = tree.missedDays === 0 ? 1000 : 500;
+      const beforeGrams = inventory.fruitGrams;
+      inventory.fruitGrams = Math.min(MAX_FRUIT_GRAMS, beforeGrams + yieldGrams);
+      const gainedGrams = inventory.fruitGrams - beforeGrams;
+
+      tree.plantedDate = todayStr;
+      tree.lastCalendarDate = todayStr;
+      tree.cycleDay = 1;
+      tree.wateringsToday = 0;
+      tree.missedDays = 0;
+      tree.status = 'growing';
+      tree.totalHarvests += 1;
+
+      pet.xp += 25;
+      pet.happiness = clampStat(pet.happiness + 15);
+      pet.energy = clampStat(pet.energy - 10);
+      if (pet.energy <= 20) pet.isExhausted = true;
+      pet.lastUpdatedAt = nowMs;
+
+      message = `Panen berhasil! +${gainedGrams} g masuk ke Inventory (${inventory.fruitGrams}/1.000 g). (+25 XP)`;
+      break;
+    }
+
+    case 'replant_tree': {
+      if (tree.status !== 'dead') {
+        res.status(400).json({ error: 'Pohon masih hidup dan bisa terus dirawat.' });
+        return;
+      }
+      tree.plantedDate = todayStr;
+      tree.lastCalendarDate = todayStr;
+      tree.cycleDay = 1;
+      tree.wateringsToday = 0;
+      tree.missedDays = 0;
+      tree.status = 'growing';
+      message = 'Bibit pohon indah baru berhasil ditanam! Jangan lupa siram 3x sehari selama 3 hari ya.';
+      break;
+    }
+
+    case 'sell_fruit': {
+      if (inventory.fruitGrams < MAX_FRUIT_GRAMS) {
+        res.status(400).json({
+          error: `Kumpulkan buah sampai 1 kg (1.000 g) dulu ya! Saat ini baru ${inventory.fruitGrams} g.`,
+        });
+        return;
+      }
+      inventory.fruitGrams = 0;
+      inventory.coins += FRUIT_SELL_COINS;
+      inventory.claimTickets += 1;
+      pet.xp += 30;
+      pet.happiness = clampStat(pet.happiness + 15);
+      pet.lastUpdatedAt = nowMs;
+      message = `1 kg buah terjual ke Toko NPC! +${FRUIT_SELL_COINS} Koin & +1 Tiket Klaim Hadiah!`;
+      break;
+    }
+
+    case 'buy_snack': {
+      const snack = SNACK_CATALOG.find((s) => s.id === snackId);
+      if (!snack || snack.priceCoins <= 0) {
+        res.status(400).json({ error: 'Item makanan tidak valid untuk dibeli.' });
+        return;
+      }
+      if (inventory.coins < snack.priceCoins) {
+        res.status(400).json({ error: `Koin belum cukup! Butuh ${snack.priceCoins} koin.` });
+        return;
+      }
+      inventory.coins -= snack.priceCoins;
+      inventory.snacks[snack.id] = (inventory.snacks[snack.id] ?? 0) + 1;
+      message = `Berhasil membeli 1 ${snack.name} dari Toko NPC!`;
+      break;
+    }
+
+    case 'claim_reward': {
+      if (inventory.claimTickets < 1) {
+        res.status(400).json({ error: 'Belum punya Tiket Klaim. Jual 1 kg buah ke Toko NPC dulu ya!' });
+        return;
+      }
+      const chosen = rewards.find((r) => r.id === rewardId);
+      if (!chosen) {
+        res.status(400).json({ error: 'Pilih salah satu dari 3 hadiah yang tersedia.' });
+        return;
+      }
+      inventory.claimTickets -= 1;
+      claimedHistory = [
+        {
+          id: `claim-${crypto.randomUUID()}`,
+          rewardId: chosen.id,
+          rewardTitle: chosen.title,
+          claimedBy: authUser.name,
+          claimedAt: nowMs,
+        },
+        ...claimedHistory,
+      ].slice(0, 50);
+      message = `Selamat! Hadiah "${chosen.title}" berhasil diklaim oleh ${authUser.name}!`;
+      break;
+    }
+
+    default: {
+      res.status(400).json({ error: 'Aksi tidak dikenali.' });
+      return;
+    }
+  }
+
+  pet.stage = computeGrowthStage(pet.xp);
+
+  workspaceState.petGame = {
+    pet,
+    tree,
+    inventory,
+    rewards,
+    claimedHistory,
+    updatedAt: nowMs,
+  };
+
+  await persistState();
+  recalculatePresence();
+  res.json({ ok: true, message, state: workspaceState });
 });
 
 app.use('/api', (_req, res) => {

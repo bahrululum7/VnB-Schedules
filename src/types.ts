@@ -56,6 +56,64 @@ export interface DayConfirmationTimestamps {
   partner2: number;
 }
 
+export type BearGrowthStage = 'baby' | 'teen' | 'adult';
+export type TreeHealthStatus = 'growing' | 'wilting' | 'dead' | 'fruiting';
+
+export type BearSnackId = 'berry' | 'bread' | 'honey' | 'salmon';
+
+export interface BearPetState {
+  name: string;
+  xp: number;
+  stage: BearGrowthStage;
+  hunger: number; // 0..100 (100 = kenyang)
+  hygiene: number; // 0..100 (100 = bersih)
+  energy: number; // 0..100 (100 = bugar)
+  happiness: number; // 0..100 (100 = bahagia)
+  isSleeping: boolean;
+  isExhausted: boolean;
+  lastUpdatedAt: number;
+}
+
+export interface TreeMissionState {
+  plantedDate: string; // YYYY-MM-DD
+  lastCalendarDate: string; // YYYY-MM-DD
+  cycleDay: number; // 1..3+
+  wateringsToday: number; // 0..3
+  missedDays: number; // 0..2+ (1 = melayu, >=2 = mati)
+  status: TreeHealthStatus;
+  totalHarvests: number;
+  lastWateredAt: number;
+}
+
+export interface InventoryState {
+  fruitGrams: number; // 0..1000 (1 kg max)
+  coins: number;
+  claimTickets: number;
+  snacks: Record<BearSnackId, number>;
+}
+
+export interface AdminRewardOption {
+  id: string;
+  title: string;
+}
+
+export interface ClaimedRewardRecord {
+  id: string;
+  rewardId: string;
+  rewardTitle: string;
+  claimedBy: string;
+  claimedAt: number;
+}
+
+export interface PetGameState {
+  pet: BearPetState;
+  tree: TreeMissionState;
+  inventory: InventoryState;
+  rewards: AdminRewardOption[];
+  claimedHistory: ClaimedRewardRecord[];
+  updatedAt: number;
+}
+
 export interface SharedWorkspaceState {
   revision?: number;
   partners: {
@@ -68,6 +126,7 @@ export interface SharedWorkspaceState {
   confirmedUpdatedAt?: Record<string, DayConfirmationTimestamps>;
   spinnerOptions: SpinnerOption[];
   lastSpin: SpinEvent | null;
+  petGame?: PetGameState;
 }
 
 export interface AuthenticatedUser {
